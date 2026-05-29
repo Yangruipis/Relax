@@ -79,6 +79,8 @@ PERF_ARGS=(
    # --recompute-method uniform
    # --recompute-num-layers 1
 
+   --use-distributed-optimizer --overlap-grad-reduce --overlap-param-gather
+
    --use-dynamic-batch-size
    --max-tokens-per-gpu 10240
    --log-probs-max-tokens-per-gpu 40960
@@ -97,6 +99,8 @@ GRPO_ARGS=(
    --eps-clip 0.2
    --eps-clip-high 0.28
    --use-tis
+   # icepop: drop tokens with ratio outside [tis-clip-low, tis-clip] instead of clamping (vanilla TIS).
+   --custom-tis-function-path relax.backends.megatron.loss.icepop_function
 )
 
 OPTIMIZER_ARGS=(
