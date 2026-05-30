@@ -2,15 +2,13 @@
 
 # Copyright (c) 2026 Relax Authors. All Rights Reserved.
 #
-# DotsOCR2 8xGPU multimodal GRPO training script.
+# DotsOCR2 8xGPU multimodal GRPO training script (hybrid: 4 actor + 4 rollout).
 #
 # Usage:
-#   bash scripts/training/multimodal/run-dotsocr2-8xgpu.sh [async|sync]
+#   bash scripts/training/multimodal/run-dotsocr2-8xgpu-hybrid.sh
 
 set -ex
 set -o pipefail
-
-MODE=${1:-"sync"}
 
 now=$(date "+%Y-%m-%d-%H:%M:%S")
 echo "当前时间: $now"
@@ -29,9 +27,9 @@ DATA_DIR="${DATA_DIR:-${EXP_DIR}}"
 NUM_ROLLOUT="${NUM_ROLLOUT:=200}"
 
 CKPT_ARGS=(
-   --hf-checkpoint ${MODEL_DIR}/rednote-hilab/dots.mocr
-   --ref-load ${MODEL_DIR}/rednote-hilab/dots.mocr
-   --save ${EXP_DIR}/dotsocr2_mcore_8xgpu
+   --hf-checkpoint ${MODEL_DIR}/rednote-hilab/dots.mocr/
+   --ref-load ${MODEL_DIR}/rednote-hilab/dots.mocr/
+   --save ${EXP_DIR}/dotsocr2_mcore_8xgpu_hybrid
    --save-interval 1000
    --megatron-to-hf-mode bridge
 )
@@ -55,23 +53,22 @@ ROLLOUT_ARGS=(
    --multimodal-keys '{"image":"image"}'
    --system-prompt "${SYSTEM_PROMPT}"
    --use-streaming-dataset
+   --balance-data
 )
 
 PERF_ARGS=(
-   --tensor-model-parallel-size 1
+   --tensor-model-parallel-size 2
    --sequence-parallel
    --pipeline-model-parallel-size 1
-   --context-parallel-size 2
+   --context-parallel-size 1
    --calculate-per-token-loss
-   --vision-dp-when-cp
    --expert-model-parallel-size 1
    --expert-tensor-parallel-size 1
 
-   # --recompute-granularity full
-   # --recompute-method uniform
-   # --recompute-num-layers 1
+   --recompute-granularity full
+   --recompute-method uniform
+   --recompute-num-layers 1
 
-   --calculate-per-token-loss
    --use-dynamic-batch-size
    --max-tokens-per-gpu 8192
 
@@ -105,7 +102,7 @@ WANDB_ARGS=(
    --use-clearml
    --use-metrics-service
    --tb-project-name ${PROJECT_NAME}
-   --tb-experiment-name dotsocr2-GRPO-gpu8-${MODE}-${now}
+   --tb-experiment-name dotsocr2-GRPO-gpu8-hybrid-${now}
 )
 
 SGLANG_ARGS=(
@@ -126,44 +123,22 @@ MISC_ARGS=(
 )
 
 mkdir -p log
-if [ ${MODE} = "async" ]; then
-    ray job submit ${RAY_NO_WAIT:+--no-wait} --address="http://127.0.0.1:8265" \
-       ${WORKING_DIR:+--working-dir "${WORKING_DIR}"} \
-       --runtime-env-json="${RUNTIME_ENV_JSON}" \
-       -- python3 -m relax.entrypoints.train \
-       --resource '{"actor": [1, 4], "rollout": [1, 4], "reference": [1, 0], "actor_fwd": [1, 0], "advantages": [1, 0]}' \
-       --max-staleness 2 \
-       --num-data-storage-units 1 \
-       --num-iters-per-train-update 8 \
-       --fully-async \
-       --use-health-check \
-       "${MODEL_ARGS[@]}" \
-       "${CKPT_ARGS[@]}" \
-       "${ROLLOUT_ARGS[@]}" \
-       "${OPTIMIZER_ARGS[@]}" \
-       "${GRPO_ARGS[@]}" \
-       "${WANDB_ARGS[@]}" \
-       "${PERF_ARGS[@]}" \
-       "${SGLANG_ARGS[@]}" \
-       "${MISC_ARGS[@]}"  2>&1 | tee log/dotsocr2-GRPO-gpu8-async-${now}.log
-else
-    ray job submit ${RAY_NO_WAIT:+--no-wait} --address="http://127.0.0.1:8265" \
-       ${WORKING_DIR:+--working-dir "${WORKING_DIR}"} \
-       --runtime-env-json="${RUNTIME_ENV_JSON}" \
-       -- python3 -m relax.entrypoints.train \
-       --resource '{"actor": [1, 8], "rollout": [1, 8]}' \
-       --max-staleness 0 \
-       --num-data-storage-units 1 \
-       --colocate \
-       --use-health-check \
-       --balance-data \
-       "${MODEL_ARGS[@]}" \
-       "${CKPT_ARGS[@]}" \
-       "${ROLLOUT_ARGS[@]}" \
-       "${OPTIMIZER_ARGS[@]}" \
-       "${GRPO_ARGS[@]}" \
-       "${WANDB_ARGS[@]}" \
-       "${PERF_ARGS[@]}" \
-       "${SGLANG_ARGS[@]}" \
-       "${MISC_ARGS[@]}"  2>&1 | tee log/dotsocr2-GRPO-gpu8-colocate-${now}.log
-fi
+ray job submit ${RAY_NO_WAIT:+--no-wait} --address="http://127.0.0.1:8265" \
+   ${WORKING_DIR:+--working-dir "${WORKING_DIR}"} \
+   --runtime-env-json="${RUNTIME_ENV_JSON}" \
+   -- python3 -m relax.entrypoints.train \
+   --resource '{"actor": [1, 4], "rollout": [1, 4]}' \
+   --max-staleness 2 \
+   --num-data-storage-units 1 \
+   --num-iters-per-train-update 1 \
+   --hybrid \
+   --use-health-check \
+   "${MODEL_ARGS[@]}" \
+   "${CKPT_ARGS[@]}" \
+   "${ROLLOUT_ARGS[@]}" \
+   "${OPTIMIZER_ARGS[@]}" \
+   "${GRPO_ARGS[@]}" \
+   "${WANDB_ARGS[@]}" \
+   "${PERF_ARGS[@]}" \
+   "${SGLANG_ARGS[@]}" \
+   "${MISC_ARGS[@]}"  2>&1 | tee log/dotsocr2-GRPO-gpu8-hybrid-${now}.log

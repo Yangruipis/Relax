@@ -909,7 +909,7 @@ def _compute_genrm_server_args(
     base = _to_local_gpu_id(base)
 
     kwargs = {
-        "model_path": args.genrm_model_path,
+        "model_path": os.path.normpath(args.args.genrm_model_path),
         "trust_remote_code": True,
         "random_seed": args.seed + rank,
         # memory
@@ -996,7 +996,7 @@ def _compute_server_args(
     base = base_gpu_id if base_gpu_id is not None else get_base_gpu_id(args, rank)
     base = _to_local_gpu_id(base)
     kwargs = {
-        "model_path": args.hf_checkpoint,
+        "model_path": os.path.normpath(args.hf_checkpoint),
         "trust_remote_code": True,
         "random_seed": args.seed + rank,
         # memory
