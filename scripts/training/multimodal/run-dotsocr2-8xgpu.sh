@@ -109,7 +109,7 @@ WANDB_ARGS=(
 SGLANG_ARGS=(
    --rollout-num-gpus-per-engine 1
    --sglang-mem-fraction-static 0.75
-   # --sglang-external-model-package relax.models.dots_ocr.sglang
+   --sglang-external-model-package relax.models.dots_ocr.sglang
 )
 
 MISC_ARGS=(
