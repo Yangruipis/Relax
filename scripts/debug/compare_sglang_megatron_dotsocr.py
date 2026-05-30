@@ -1362,8 +1362,8 @@ def _compare_megatron_qkv_split_vs_hf(mg_dict: dict, hf_dict: dict, aligned_n: i
     num_q_heads = 12
     num_kv_heads = 2
     head_dim = hf_q.shape[-1] // num_q_heads
-    q_dim = num_q_heads * head_dim
-    kv_dim = num_kv_heads * head_dim
+    # q_dim = num_q_heads * head_dim
+    # kv_dim = num_kv_heads * head_dim
     group_size = (num_q_heads // num_kv_heads) * head_dim + 2 * head_dim  # = 6*128 + 128 + 128 = 1024
     expected_dim = num_kv_heads * group_size  # = 2048
 

@@ -128,9 +128,9 @@ ray job submit ${RAY_NO_WAIT:+--no-wait} --address="http://127.0.0.1:8265" \
    --runtime-env-json="${RUNTIME_ENV_JSON}" \
    -- python3 -m relax.entrypoints.train \
    --resource '{"actor": [1, 4], "rollout": [1, 4]}' \
-   --max-staleness 2 \
+   --max-staleness 0 \
    --num-data-storage-units 1 \
-   --num-iters-per-train-update 1 \
+   --num-iters-per-train-update 8 \
    --hybrid \
    --use-health-check \
    "${MODEL_ARGS[@]}" \
