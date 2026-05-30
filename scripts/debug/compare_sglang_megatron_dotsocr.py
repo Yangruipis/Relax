@@ -208,9 +208,12 @@ def parse_args() -> argparse.Namespace:
 
 def _build_messages(args: argparse.Namespace) -> list[dict]:
     """Mirror the rollout-side chat template (apply-chat-template + system
-    prompt + multimodal user turn) so we exercise the same prefill SGLang
-    would see during RL training. When ``--image`` is omitted, the user
-    turn is a plain text string and no vision tokens are inserted."""
+    prompt + multimodal user turn) so we exercise the same prefill SGLang would
+    see during RL training.
+
+    When ``--image`` is omitted, the user turn is a plain text string and no
+    vision tokens are inserted.
+    """
     messages = []
     if not args.no_system_prompt and args.system_prompt:
         messages.append({"role": "system", "content": args.system_prompt})
@@ -250,10 +253,11 @@ def _build_processor_inputs(args: argparse.Namespace):
     provided).
 
     Both sides will use these exact ``input_ids``; the megatron forward
-    consumes ``pixel_values`` + ``image_grid_thw`` directly, while sglang
-    re-tokenizes from text + image_data (and we assert its expanded ids
-    match). When ``--image`` is omitted, this falls back to the raw
-    tokenizer path so we exercise the language backbone only."""
+    consumes ``pixel_values`` + ``image_grid_thw`` directly, while sglang re-
+    tokenizes from text + image_data (and we assert its expanded ids match).
+    When ``--image`` is omitted, this falls back to the raw tokenizer path so
+    we exercise the language backbone only.
+    """
     from transformers import AutoProcessor, AutoTokenizer
 
     messages = _build_messages(args)
@@ -279,11 +283,14 @@ def _build_processor_inputs(args: argparse.Namespace):
 
 
 def _init_single_gpu_distributed(seed: int) -> None:
-    """Bring up tp=pp=cp=ep=1 mpu state. Crucially seeds the model-parallel
+    """Bring up tp=pp=cp=ep=1 mpu state.
+
+    Crucially seeds the model-parallel
     RNG via ``tensor_parallel.model_parallel_cuda_manual_seed`` — skipping
     this triggers ``cuda rng state model-parallel-rng is not added`` the
     first time a TP layer forwards (mirrors ``relax/backends/megatron/
-    initialize.py:32``)."""
+    initialize.py:32``).
+    """
     import torch.distributed as dist
     from megatron.core import mpu, tensor_parallel
 
@@ -335,9 +342,12 @@ def _apply_single_gpu_provider_overrides(provider, dtype: torch.dtype) -> None:
 
 
 def _to_bsh(t: torch.Tensor, kind: str) -> torch.Tensor:
-    """Megatron decoder layers + final_layernorm + output_layer produce SBH/SBV;
-    HF produces BSH/BSV. Normalize both to BSH/BSV using ``kind`` as the hint
-    of which side this tensor came from."""
+    """Megatron decoder layers + final_layernorm + output_layer produce
+    SBH/SBV; HF produces BSH/BSV.
+
+    Normalize both to BSH/BSV using ``kind`` as the hint of which side this
+    tensor came from.
+    """
     if kind == "megatron" and t.dim() == 3:
         return t.transpose(0, 1).contiguous()
     return t
@@ -354,15 +364,19 @@ def _capture_hook(store: dict, name: str, kind: str):
         if not isinstance(out, torch.Tensor):
             return
         store[name] = _to_bsh(out, kind).detach().to(torch.bfloat16).cpu()
+
     return hook
 
 
 def _capture_rope_hook(store: dict, name: str):
-    """Special hook for rotary embedding modules. Megatron's RotaryEmbedding
-    returns a freqs tensor (shape ``[seq, 1, 1, dim]``); HF's
-    Qwen2RotaryEmbedding returns a ``(cos, sin)`` tuple. Both stored as
-    float32 CPU tensors so the compare step can do the cos/sin math
-    consistently."""
+    """Special hook for rotary embedding modules.
+
+    Megatron's RotaryEmbedding returns a freqs tensor (shape ``[seq, 1, 1,
+    dim]``); HF's Qwen2RotaryEmbedding returns a ``(cos, sin)`` tuple. Both
+    stored as float32 CPU tensors so the compare step can do the cos/sin math
+    consistently.
+    """
+
     def hook(_mod, _inp, out):
         if isinstance(out, (tuple, list)):
             for i, t in enumerate(out):
@@ -370,14 +384,18 @@ def _capture_rope_hook(store: dict, name: str):
                     store[f"{name}.{i}"] = t.detach().float().cpu()
         elif isinstance(out, torch.Tensor):
             store[name] = out.detach().float().cpu()
+
     return hook
 
 
 def _capture_input_hook(store: dict, name: str, kind: str):
     """Pre-hook variant: capture the *input* of a module, not its output.
-    Used to grab HF Attention's pre-o_proj tensor (which is post-RoPE +
-    post-softmax + post-V-matmul) so we can compare against Megatron's
-    ``core_attention`` *output* (same logical position)."""
+
+    Used to grab HF Attention's pre-o_proj tensor (which is post-RoPE + post-
+    softmax + post-V-matmul) so we can compare against Megatron's
+    ``core_attention`` *output* (same logical position).
+    """
+
     def pre_hook(_mod, args):
         if not args:
             return
@@ -385,6 +403,7 @@ def _capture_input_hook(store: dict, name: str, kind: str):
         if not isinstance(t, torch.Tensor):
             return
         store[name] = _to_bsh(t, kind).detach().to(torch.bfloat16).cpu()
+
     return pre_hook
 
 
@@ -395,11 +414,12 @@ def _parse_inspect_layers(spec: str) -> set[int]:
 def _install_megatron_hooks(model, inspect_layers: set[int]) -> tuple[dict, list]:
     """Register hooks on relax DotsOCRModel → returns (captured_dict, handles).
 
-    For layers in ``inspect_layers`` we additionally hook ``self_attention``
-    + its three sub-modules (linear_qkv, core_attention, linear_proj) so we
-    can localize *inside* attention: linear_qkv tests fused-RMSNorm+QKV
-    projection, core_attention tests RoPE+softmax+matmul, linear_proj tests
-    the o_proj output."""
+    For layers in ``inspect_layers`` we additionally hook ``self_attention`` +
+    its three sub-modules (linear_qkv, core_attention, linear_proj) so we can
+    localize *inside* attention: linear_qkv tests fused-RMSNorm+QKV projection,
+    core_attention tests RoPE+softmax+matmul, linear_proj tests the o_proj
+    output.
+    """
     captured: dict = {}
     handles: list = []
     lm = model.language_model
@@ -429,7 +449,9 @@ def _install_megatron_hooks(model, inspect_layers: set[int]) -> tuple[dict, list
         if i in inspect_layers:
             if hasattr(layer, "self_attention"):
                 attn = layer.self_attention
-                handles.append(attn.register_forward_hook(_capture_hook(captured, f"layer.{i:02d}.attn_out", "megatron")))
+                handles.append(
+                    attn.register_forward_hook(_capture_hook(captured, f"layer.{i:02d}.attn_out", "megatron"))
+                )
                 for sub in ("linear_qkv", "core_attention", "linear_proj"):
                     if hasattr(attn, sub):
                         handles.append(
@@ -439,9 +461,7 @@ def _install_megatron_hooks(model, inspect_layers: set[int]) -> tuple[dict, list
                         )
             if hasattr(layer, "mlp"):
                 handles.append(
-                    layer.mlp.register_forward_hook(
-                        _capture_hook(captured, f"layer.{i:02d}.mlp_out", "megatron")
-                    )
+                    layer.mlp.register_forward_hook(_capture_hook(captured, f"layer.{i:02d}.mlp_out", "megatron"))
                 )
     if getattr(lm.decoder, "final_layernorm", None) is not None:
         handles.append(
@@ -495,9 +515,7 @@ def _install_hf_hooks(model, inspect_layers: set[int]) -> tuple[dict, list]:
                     )
             if hasattr(layer, "mlp"):
                 handles.append(
-                    layer.mlp.register_forward_hook(
-                        _capture_hook(captured, f"layer.{i:02d}.mlp_out", "hf")
-                    )
+                    layer.mlp.register_forward_hook(_capture_hook(captured, f"layer.{i:02d}.mlp_out", "hf"))
                 )
     final_norm = getattr(inner, "norm", None) or getattr(inner, "final_layernorm", None)
     if final_norm is not None:
@@ -512,7 +530,10 @@ def _intermediates_path(dump_dir: Path, side: str) -> Path:
 
 def _load_hf_safetensors_to_cpu(checkpoint_dir: str) -> dict[str, torch.Tensor]:
     """Read the canonical HF weights straight from disk so we don't depend on
-    AutoModel building the live model. Returns ``{hf_name: cpu_tensor}``."""
+    AutoModel building the live model.
+
+    Returns ``{hf_name: cpu_tensor}``.
+    """
     import glob
 
     from safetensors import safe_open
@@ -529,11 +550,13 @@ def _load_hf_safetensors_to_cpu(checkpoint_dir: str) -> dict[str, torch.Tensor]:
 
 
 def _print_provider_vs_hf_config(provider, hf_config) -> None:
-    """Side-by-side dump of attention-/RoPE-/norm-relevant fields. When the
-    forward output diverges but weights round-trip cleanly, the bug is
-    almost always a provider attribute that didn't get propagated from the
-    HF config (rope_theta, attention_bias, head_dim, rope_scaling…). This
-    table makes any such mismatch immediately visible."""
+    """Side-by-side dump of attention-/RoPE-/norm-relevant fields.
+
+    When the forward output diverges but weights round-trip cleanly, the bug is
+    almost always a provider attribute that didn't get propagated from the HF
+    config (rope_theta, attention_bias, head_dim, rope_scaling…). This table
+    makes any such mismatch immediately visible.
+    """
     # Show the *raw* config storage so it's obvious where HF stashed rope_theta.
     # dots.mocr is non-standard: rope_theta lives in rope_scaling['rope_theta'],
     # not at top level. transformers 5.x auto-migrates this into rope_parameters,
@@ -563,25 +586,49 @@ def _print_provider_vs_hf_config(provider, hf_config) -> None:
     # default in TransformerConfig is False (matches HF). We report both so
     # any deviation is loud.
     rows = [
-        ("rope_theta",            getattr(hf_config, "rope_theta", None),                getattr(provider, "rotary_base", None)),
-        ("rope_scaling",          rope_scaling_hf,                                       rope_scaling_pv),
-        ("rotary_percent",        "1.0 (HF Qwen2 default)",                              getattr(provider, "rotary_percent", None)),
-        ("rotary_interleaved",    "False (HF Qwen2 = Llama halves)",                     rope_interleaved_pv),
-        ("apply_rope_fusion",     "N/A",                                                 getattr(provider, "apply_rope_fusion", None)),
-        ("rms_norm_eps",          getattr(hf_config, "rms_norm_eps", None),              getattr(provider, "layernorm_epsilon", None)),
-        ("hidden_size",           getattr(hf_config, "hidden_size", None),               getattr(provider, "hidden_size", None)),
-        ("ffn_hidden_size",       getattr(hf_config, "intermediate_size", None),         getattr(provider, "ffn_hidden_size", None)),
-        ("num_attention_heads",   getattr(hf_config, "num_attention_heads", None),       getattr(provider, "num_attention_heads", None)),
-        ("num_key_value_heads",   getattr(hf_config, "num_key_value_heads", None),       getattr(provider, "num_query_groups", None)),
-        ("head_dim",              getattr(hf_config, "head_dim", None) or (getattr(hf_config, "hidden_size", 0) // max(getattr(hf_config, "num_attention_heads", 1), 1)),
-                                                                                          getattr(provider, "kv_channels", None)),
-        ("attention_bias",        getattr(hf_config, "attention_bias", None),            getattr(provider, "add_qkv_bias", None)),
-        ("qk_layernorm",          getattr(hf_config, "qk_layernorm", False),             getattr(provider, "qk_layernorm", None)),
-        ("hidden_act",            getattr(hf_config, "hidden_act", None),                getattr(provider, "activation_func", None)),
-        ("max_position_embeddings", getattr(hf_config, "max_position_embeddings", None), getattr(provider, "seq_length", None)),
-        ("tie_word_embeddings",   getattr(hf_config, "tie_word_embeddings", None),       getattr(provider, "share_embeddings_and_output_weights", None)),
-        ("vocab_size",            getattr(hf_config, "vocab_size", None),                getattr(provider, "vocab_size", None)),
-        ("attention_softmax_in_fp32", "N/A (HF eager uses fp32)",                        getattr(provider, "attention_softmax_in_fp32", None)),
+        ("rope_theta", getattr(hf_config, "rope_theta", None), getattr(provider, "rotary_base", None)),
+        ("rope_scaling", rope_scaling_hf, rope_scaling_pv),
+        ("rotary_percent", "1.0 (HF Qwen2 default)", getattr(provider, "rotary_percent", None)),
+        ("rotary_interleaved", "False (HF Qwen2 = Llama halves)", rope_interleaved_pv),
+        ("apply_rope_fusion", "N/A", getattr(provider, "apply_rope_fusion", None)),
+        ("rms_norm_eps", getattr(hf_config, "rms_norm_eps", None), getattr(provider, "layernorm_epsilon", None)),
+        ("hidden_size", getattr(hf_config, "hidden_size", None), getattr(provider, "hidden_size", None)),
+        ("ffn_hidden_size", getattr(hf_config, "intermediate_size", None), getattr(provider, "ffn_hidden_size", None)),
+        (
+            "num_attention_heads",
+            getattr(hf_config, "num_attention_heads", None),
+            getattr(provider, "num_attention_heads", None),
+        ),
+        (
+            "num_key_value_heads",
+            getattr(hf_config, "num_key_value_heads", None),
+            getattr(provider, "num_query_groups", None),
+        ),
+        (
+            "head_dim",
+            getattr(hf_config, "head_dim", None)
+            or (getattr(hf_config, "hidden_size", 0) // max(getattr(hf_config, "num_attention_heads", 1), 1)),
+            getattr(provider, "kv_channels", None),
+        ),
+        ("attention_bias", getattr(hf_config, "attention_bias", None), getattr(provider, "add_qkv_bias", None)),
+        ("qk_layernorm", getattr(hf_config, "qk_layernorm", False), getattr(provider, "qk_layernorm", None)),
+        ("hidden_act", getattr(hf_config, "hidden_act", None), getattr(provider, "activation_func", None)),
+        (
+            "max_position_embeddings",
+            getattr(hf_config, "max_position_embeddings", None),
+            getattr(provider, "seq_length", None),
+        ),
+        (
+            "tie_word_embeddings",
+            getattr(hf_config, "tie_word_embeddings", None),
+            getattr(provider, "share_embeddings_and_output_weights", None),
+        ),
+        ("vocab_size", getattr(hf_config, "vocab_size", None), getattr(provider, "vocab_size", None)),
+        (
+            "attention_softmax_in_fp32",
+            "N/A (HF eager uses fp32)",
+            getattr(provider, "attention_softmax_in_fp32", None),
+        ),
     ]
 
     def _norm(v):
@@ -604,12 +651,14 @@ def _print_provider_vs_hf_config(provider, hf_config) -> None:
 
 def _check_megatron_weights_vs_hf(args: argparse.Namespace, bridge, model) -> None:
     """Round-trip megatron weights back to HF format and compare against the
-    on-disk safetensors. The bridge's ``export_hf_weights`` un-fuses linear_qkv
-    into q/k/v and linear_fc1 into gate/up using the same mapping that
-    ``load_hf_weights`` consumed in reverse — so a clean round-trip means the
-    bridge mapping is OK and the loaded weights match what the HF model
-    started with. Any diff here is either a missing AutoMapping or numerical
-    corruption during load."""
+    on-disk safetensors.
+
+    The bridge's ``export_hf_weights`` un-fuses linear_qkv into q/k/v and
+    linear_fc1 into gate/up using the same mapping that ``load_hf_weights``
+    consumed in reverse — so a clean round-trip means the bridge mapping is OK
+    and the loaded weights match what the HF model started with. Any diff here
+    is either a missing AutoMapping or numerical corruption during load.
+    """
     print("\n========== weight check: megatron (post-load) vs HF safetensors ==========")
     print(f"  checkpoint = {args.hf_checkpoint}")
 
@@ -668,8 +717,8 @@ def _check_megatron_weights_vs_hf(args: argparse.Namespace, bridge, model) -> No
 
 @torch.no_grad()
 def run_megatron(args: argparse.Namespace) -> DumpRecord:
-    """Build the Megatron DotsOCR model the same way relax does for the
-    actor, forward a single (text, image) sample, return per-token logprobs."""
+    """Build the Megatron DotsOCR model the same way relax does for the actor,
+    forward a single (text, image) sample, return per-token logprobs."""
     import torch.nn.functional as F
     from megatron.bridge import AutoBridge
 
@@ -730,7 +779,12 @@ def run_megatron(args: argparse.Namespace) -> DumpRecord:
             print(f"    inv_freq[:8]={inv[:8].tolist()}")
             # Persist for the compare step.
             torch.save(
-                {"inv_freq": inv.detach().float().cpu(), "rotary_base": base, "rotary_interleaved": interleaved, "module": n},
+                {
+                    "inv_freq": inv.detach().float().cpu(),
+                    "rotary_base": base,
+                    "rotary_interleaved": interleaved,
+                    "module": n,
+                },
                 Path(args.dump_dir) / "megatron.rope_invfreq.pt",
             )
         else:
@@ -854,12 +908,16 @@ def run_hf(args: argparse.Namespace) -> DumpRecord:
     print(f"[hf] chat_template text (first 300 chars): {text[:300]!r}")
 
     print(f"[hf] loading AutoModelForCausalLM from {args.hf_checkpoint} (trust_remote_code)")
-    model = AutoModelForCausalLM.from_pretrained(
-        args.hf_checkpoint,
-        torch_dtype=dtype,
-        trust_remote_code=True,
-        low_cpu_mem_usage=True,
-    ).to(device).eval()
+    model = (
+        AutoModelForCausalLM.from_pretrained(
+            args.hf_checkpoint,
+            torch_dtype=dtype,
+            trust_remote_code=True,
+            low_cpu_mem_usage=True,
+        )
+        .to(device)
+        .eval()
+    )
 
     # Dump every rotary-like submodule's inv_freq buffer for direct comparison
     # to Megatron's inv_freq. Same idea as the megatron-side dump.
@@ -961,8 +1019,8 @@ def _resolve_external_pkg() -> str:
 @torch.no_grad()
 def run_sglang(args: argparse.Namespace) -> DumpRecord:
     """Launch the offline ``sglang.Engine`` with the relax external model
-    package, fire one generate() call with ``return_logprob=True``, and
-    pull per-input-token logprobs out of meta_info."""
+    package, fire one generate() call with ``return_logprob=True``, and pull
+    per-input-token logprobs out of meta_info."""
     # MUST be set *before* importing sglang so registry picks up the external
     # model package (same as relax/backends/sglang/sglang_engine.py:_init_normal).
     external_pkg = _resolve_external_pkg()
@@ -1009,9 +1067,7 @@ def run_sglang(args: argparse.Namespace) -> DumpRecord:
     meta = out["meta_info"]
     raw = meta["input_token_logprobs"]
     sglang_ids = [int(item[1]) for item in raw]
-    per_token: list[Optional[float]] = [
-        (None if item[0] is None else float(item[0])) for item in raw
-    ]
+    per_token: list[Optional[float]] = [(None if item[0] is None else float(item[0])) for item in raw]
 
     if sglang_ids != expected_ids:
         # Not fatal — image-token expansion can differ depending on processor
@@ -1070,10 +1126,12 @@ def load_record(dump_dir: Path, side: str) -> DumpRecord:
 
 
 def _compare_pair(a: DumpRecord, b: DumpRecord, top_n_worst: int) -> None:
-    """Print id-prefix alignment + |Δ| stats + cosine + worst positions for
-    one (a, b) pair. Each pair gets its own alignment because mm-image-pad
-    sentinels may differ across engines and the divergence point is pair-
-    specific."""
+    """Print id-prefix alignment + |Δ| stats + cosine + worst positions for one
+    (a, b) pair.
+
+    Each pair gets its own alignment because mm-image-pad sentinels may differ
+    across engines and the divergence point is pair- specific.
+    """
     label = f"{a.side:>8} vs {b.side:<8}"
     print(f"\n---------- {label} ----------")
     print(f"len({a.side})={len(a.input_ids)}  len({b.side})={len(b.input_ids)}")
@@ -1087,10 +1145,7 @@ def _compare_pair(a: DumpRecord, b: DumpRecord, top_n_worst: int) -> None:
     print(f"aligned id-prefix = {aligned_n} / {n}")
     if aligned_n < n:
         i = aligned_n
-        print(
-            f"first id mismatch at pos={i}: {a.side}={a.input_ids[i]} "
-            f"{b.side}={b.input_ids[i]} (truncating)"
-        )
+        print(f"first id mismatch at pos={i}: {a.side}={a.input_ids[i]} {b.side}={b.input_ids[i]} (truncating)")
 
     diffs: list[tuple[int, int, float, float, float]] = []
     for i in range(1, aligned_n):  # skip position 0 (no preceding context)
@@ -1130,11 +1185,13 @@ def _compare_pair(a: DumpRecord, b: DumpRecord, top_n_worst: int) -> None:
 
 
 def compare(records: dict[str, DumpRecord], top_n_worst: int) -> None:
-    """Pairwise-compare every available side. With megatron+sglang+hf this
-    prints 3 blocks; with only 2 sides present it prints 1 block. The
-    pairwise view is what lets you triangulate which engine is the broken
-    one — e.g. if megatron-vs-hf and megatron-vs-sglang are both bad but
-    sglang-vs-hf is near 1.0, megatron is the culprit."""
+    """Pairwise-compare every available side.
+
+    With megatron+sglang+hf this prints 3 blocks; with only 2 sides present it
+    prints 1 block. The pairwise view is what lets you triangulate which engine
+    is the broken one — e.g. if megatron-vs-hf and megatron-vs-sglang are both
+    bad but sglang-vs-hf is near 1.0, megatron is the culprit.
+    """
     print("\n========== compare summary ==========")
     available = sorted(records.keys())
     print(f"sides present: {available}")
@@ -1150,8 +1207,9 @@ def _stats_one_tensor(a: torch.Tensor, b: torch.Tensor) -> dict:
     """Per-tensor diagnostics: flatten cosine + |Δ|/relative-error stats.
 
     Both inputs are upcast to float32 for stable accumulation; the relative
-    error denominator uses |b| with a small floor to avoid div-by-zero at
-    near-zero entries (typical in attention masks and post-RMSNorm tails)."""
+    error denominator uses |b| with a small floor to avoid div-by-zero at near-
+    zero entries (typical in attention masks and post-RMSNorm tails).
+    """
     a32 = a.detach().float().reshape(-1)
     b32 = b.detach().float().reshape(-1)
     n = min(a32.numel(), b32.numel())
@@ -1172,8 +1230,8 @@ def _stats_one_tensor(a: torch.Tensor, b: torch.Tensor) -> dict:
 
 
 def _trim_to_aligned_prefix(a: torch.Tensor, b: torch.Tensor, aligned_n: int) -> tuple[torch.Tensor, torch.Tensor]:
-    """For BSH/BSV tensors, restrict to the first ``aligned_n`` positions so
-    we don't include image-pad sentinels that differ between engines."""
+    """For BSH/BSV tensors, restrict to the first ``aligned_n`` positions so we
+    don't include image-pad sentinels that differ between engines."""
     if a.dim() >= 2 and b.dim() >= 2:
         n = min(a.shape[1], b.shape[1], aligned_n)
         return a[:, :n], b[:, :n]
@@ -1246,8 +1304,12 @@ def _compare_rope_freqs(mg_dict: dict, hf_dict: dict) -> None:
     hf_cos, hf_sin = hf_cos[:n, :d], hf_sin[:n, :d]
     cos_diff = (mg_cos - hf_cos).abs()
     sin_diff = (mg_sin - hf_sin).abs()
-    cos_cos = torch.nn.functional.cosine_similarity(mg_cos.reshape(-1).unsqueeze(0), hf_cos.reshape(-1).unsqueeze(0), dim=1).item()
-    sin_cos = torch.nn.functional.cosine_similarity(mg_sin.reshape(-1).unsqueeze(0), hf_sin.reshape(-1).unsqueeze(0), dim=1).item()
+    cos_cos = torch.nn.functional.cosine_similarity(
+        mg_cos.reshape(-1).unsqueeze(0), hf_cos.reshape(-1).unsqueeze(0), dim=1
+    ).item()
+    sin_cos = torch.nn.functional.cosine_similarity(
+        mg_sin.reshape(-1).unsqueeze(0), hf_sin.reshape(-1).unsqueeze(0), dim=1
+    ).item()
     print(f"  cos: |Δ|mean={cos_diff.mean():.6f} max={cos_diff.max():.6f} cosine_sim={cos_cos:.8f}")
     print(f"  sin: |Δ|mean={sin_diff.mean():.6f} max={sin_diff.max():.6f} cosine_sim={sin_cos:.8f}")
 
@@ -1256,7 +1318,9 @@ def _compare_rope_freqs(mg_dict: dict, hf_dict: dict) -> None:
     # mg_cos[pos, 0] should equal mg_cos[pos, dim//2].
     half = d // 2
     print(f"\n  per-position sample (first 4 positions, dim={d}, half={half}):")
-    print(f"  {'pos':>4} {'mg_cos[0]':>12} {'hf_cos[0]':>12} {'mg_cos[half]':>14} {'hf_cos[half]':>14} {'mg_cos[1]':>12} {'hf_cos[1]':>12}")
+    print(
+        f"  {'pos':>4} {'mg_cos[0]':>12} {'hf_cos[0]':>12} {'mg_cos[half]':>14} {'hf_cos[half]':>14} {'mg_cos[1]':>12} {'hf_cos[1]':>12}"
+    )
     for pos in range(min(4, n)):
         print(
             f"  {pos:>4} "
@@ -1277,10 +1341,12 @@ def _compare_rope_freqs(mg_dict: dict, hf_dict: dict) -> None:
 
 def _compare_megatron_qkv_split_vs_hf(mg_dict: dict, hf_dict: dict, aligned_n: int) -> None:
     """Megatron's fused ``linear_qkv`` output for GQA is laid out per-group:
+
     [g0_q0..q5, g0_k, g0_v, g1_q0..q5, g1_k, g1_v] each block being head_dim
     wide. Split it back into Q/K/V and compare against HF's separate
-    q_proj/k_proj/v_proj outputs to isolate whether (RMSNorm+QKV-projection)
-    is correct, independent of RoPE/attention math."""
+    q_proj/k_proj/v_proj outputs to isolate whether (RMSNorm+QKV-projection) is
+    correct, independent of RoPE/attention math.
+    """
     mg_key = "layer.00.attn.linear_qkv"
     if mg_key not in mg_dict:
         return
@@ -1314,7 +1380,9 @@ def _compare_megatron_qkv_split_vs_hf(mg_dict: dict, hf_dict: dict, aligned_n: i
     for g in range(num_kv_heads):
         base = g * group_size
         mg_q_chunks.append(mg_qkv[..., base : base + heads_per_group * head_dim])
-        mg_k_chunks.append(mg_qkv[..., base + heads_per_group * head_dim : base + heads_per_group * head_dim + head_dim])
+        mg_k_chunks.append(
+            mg_qkv[..., base + heads_per_group * head_dim : base + heads_per_group * head_dim + head_dim]
+        )
         mg_v_chunks.append(mg_qkv[..., base + heads_per_group * head_dim + head_dim : base + group_size])
     mg_q = torch.cat(mg_q_chunks, dim=-1)
     mg_k = torch.cat(mg_k_chunks, dim=-1)
@@ -1338,8 +1406,10 @@ def _compare_megatron_qkv_split_vs_hf(mg_dict: dict, hf_dict: dict, aligned_n: i
 
 def compare_intermediates(dump_dir: Path, aligned_n: int) -> None:
     """Walk per-layer dumps from megatron/{side}.intermediates.pt + hf/...
-    and report cosine + |Δ| per layer so we can localize the first layer
-    where the two diverge meaningfully (cos drops below ~0.99)."""
+
+    and report cosine + |Δ| per layer so we can localize the first layer where
+    the two diverge meaningfully (cos drops below ~0.99).
+    """
     mg_path = _intermediates_path(dump_dir, "megatron")
     hf_path = _intermediates_path(dump_dir, "hf")
     if not mg_path.exists() or not hf_path.exists():

@@ -175,67 +175,33 @@ def _wait_server_healthy(base_url, api_key, is_process_alive, timeout=None):
             )
 
     with requests.Session() as session:
-        attempt = 0
-        phase_start = time.monotonic()
-        logger.info(f"[dbg] _wait_server_healthy phase=health_generate START url={base_url}")
         while True:
             _check_deadline("health_generate")
             try:
                 response = session.get(f"{base_url}/health_generate", headers=headers, timeout=_REQUEST_TIMEOUT)
                 if response.status_code == 200:
-                    logger.info(
-                        f"[dbg] _wait_server_healthy phase=health_generate OK "
-                        f"after {time.monotonic() - phase_start:.1f}s ({attempt} attempts)"
-                    )
                     break
-                else:
-                    logger.info(
-                        f"[dbg] health_generate attempt#{attempt} status={response.status_code} "
-                        f"body={response.text[:200]!r}"
-                    )
-            except requests.RequestException as e:
-                if attempt % 5 == 0:
-                    logger.info(
-                        f"[dbg] health_generate attempt#{attempt} no response yet "
-                        f"({time.monotonic() - phase_start:.1f}s elapsed): {type(e).__name__}"
-                    )
+            except requests.RequestException:
+                pass
 
             if not is_process_alive():
                 raise Exception("Server process terminated unexpectedly.")
 
-            attempt += 1
             time.sleep(2)
 
         # use flush_cache to make sure the working queue is empty, so that we can do offload
-        attempt = 0
-        phase_start = time.monotonic()
-        logger.info(f"[dbg] _wait_server_healthy phase=flush_cache START url={base_url}")
         while True:
             _check_deadline("flush_cache")
             try:
                 response = session.get(f"{base_url}/flush_cache", headers=headers, timeout=_REQUEST_TIMEOUT)
                 if response.status_code == 200:
-                    logger.info(
-                        f"[dbg] _wait_server_healthy phase=flush_cache OK "
-                        f"after {time.monotonic() - phase_start:.1f}s ({attempt} attempts)"
-                    )
                     break
-                else:
-                    logger.info(
-                        f"[dbg] flush_cache attempt#{attempt} status={response.status_code} "
-                        f"body={response.text[:200]!r}"
-                    )
-            except requests.RequestException as e:
-                if attempt % 5 == 0:
-                    logger.info(
-                        f"[dbg] flush_cache attempt#{attempt} no response yet "
-                        f"({time.monotonic() - phase_start:.1f}s elapsed): {type(e).__name__}"
-                    )
+            except requests.RequestException:
+                pass
 
             if not is_process_alive():
                 raise Exception("Server process terminated unexpectedly.")
 
-            attempt += 1
             time.sleep(2)
 
 
@@ -468,20 +434,14 @@ class SGLangEngine(RayActor):
                 os.environ["SGLANG_EXTERNAL_MM_MODEL_ARCH"] = arch
             logger.info(f"Set SGLANG_EXTERNAL_MODEL_PACKAGE={external_pkg}, SGLANG_EXTERNAL_MM_MODEL_ARCH={arch}")
 
-        logger.info(f"[dbg] _init_normal calling launch_server_process for {self.server_host}:{self.server_port}")
         self.process = launch_server_process(ServerArgs(**server_args_dict))
-        logger.info(f"[dbg] _init_normal launch_server_process RETURNED process={self.process}")
 
         bootstrap_port = (
             server_args_dict.get("disaggregation_bootstrap_port") if self.worker_type == "prefill" else None
         )
         # Only register to router if skip_router_registration=False
         if not self._skip_router_registration:
-            logger.info(f"[dbg] _init_normal register_to_router START (bootstrap_port={bootstrap_port})")
             self.register_to_router(bootstrap_port=bootstrap_port)
-            logger.info("[dbg] _init_normal register_to_router DONE")
-        else:
-            logger.info("[dbg] _init_normal skip_router_registration=True")
 
     def _make_request(self, endpoint: str, payload: dict | None = None):
         """Make a POST request to the specified endpoint with the given

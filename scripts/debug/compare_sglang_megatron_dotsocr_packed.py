@@ -1,8 +1,8 @@
 # Copyright (c) 2026 Relax Authors. All Rights Reserved.
 
 """Distributed (TP/PP/CP) + packed-sequence variant of
-``compare_sglang_megatron_dotsocr.py``, run as **three independent stages**
-so SGLang's child-process model doesn't fight with ``torchrun``'s env vars.
+``compare_sglang_megatron_dotsocr.py``, run as **three independent stages** so
+SGLang's child-process model doesn't fight with ``torchrun``'s env vars.
 
   * **Two samples packed into one sequence** (one multimodal: boxes.png +
     "Describe this image."; one text-only: arbitrary prompt).
@@ -47,13 +47,12 @@ import json
 import os
 import sys
 from dataclasses import asdict
-from functools import partial
 from pathlib import Path
 from typing import Optional
 
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
+
 
 # Reuse single-GPU helpers verbatim.
 sys.path.insert(0, str(Path(__file__).parent))
@@ -62,13 +61,10 @@ from compare_sglang_megatron_dotsocr import (  # noqa: E402
     DTYPE_MAP,
     DumpRecord,
     _build_messages,
-    _dump_path,
     _load_image_any,
     compare,
-    load_record,
     run_hf,
     run_sglang,
-    save_record,
 )
 
 
@@ -239,7 +235,10 @@ def run_front(args: argparse.Namespace, dump_dir: Path) -> None:
 
 def _init_distributed(args: argparse.Namespace) -> None:
     """Bring up NCCL + Megatron MPU from the torchrun-provided RANK/LOCAL_RANK/
-    WORLD_SIZE env. Asserts ``tp*pp*cp == WORLD_SIZE``."""
+    WORLD_SIZE env.
+
+    Asserts ``tp*pp*cp == WORLD_SIZE``.
+    """
     from megatron.core import mpu, tensor_parallel
 
     if "WORLD_SIZE" not in os.environ or "RANK" not in os.environ:
@@ -252,8 +251,7 @@ def _init_distributed(args: argparse.Namespace) -> None:
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     expected = args.tp_size * args.pp_size * args.cp_size
     assert world_size == expected, (
-        f"WORLD_SIZE={world_size} but tp*pp*cp={expected} "
-        f"(tp={args.tp_size} pp={args.pp_size} cp={args.cp_size})"
+        f"WORLD_SIZE={world_size} but tp*pp*cp={expected} (tp={args.tp_size} pp={args.pp_size} cp={args.cp_size})"
     )
 
     torch.cuda.set_device(local_rank)
@@ -271,9 +269,9 @@ def _init_distributed(args: argparse.Namespace) -> None:
 
 
 def _apply_provider_overrides(provider, args: argparse.Namespace, dtype: torch.dtype) -> None:
-    """Mirror ``relax.backends.megatron.model_provider`` CLI overrides but
-    keep things minimal: parallel_output=True (vocab-parallel logits for the
-    fused CE path), variable_seq_lengths=True (packed THD), no rope fusion
+    """Mirror ``relax.backends.megatron.model_provider`` CLI overrides but keep
+    things minimal: parallel_output=True (vocab-parallel logits for the fused
+    CE path), variable_seq_lengths=True (packed THD), no rope fusion
     (multimodal requirement)."""
     provider.tensor_model_parallel_size = args.tp_size
     provider.pipeline_model_parallel_size = args.pp_size
@@ -303,9 +301,10 @@ def _process_sample(args: argparse.Namespace, sample: str) -> dict:
     """Run the HF AutoProcessor (or tokenizer fallback) for one sample and
     return the canonical ``input_ids`` + optional pixel_values/grid_thw.
 
-    Mirrors ``_build_processor_inputs`` from the single-GPU script but
-    inlined so we can call it for both samples without going through
-    ``_build_messages``'s argparse coupling."""
+    Mirrors ``_build_processor_inputs`` from the single-GPU script but inlined
+    so we can call it for both samples without going through
+    ``_build_messages``'s argparse coupling.
+    """
     from transformers import AutoProcessor, AutoTokenizer
 
     sub = _per_sample_args(args, sample)
@@ -317,9 +316,9 @@ def _process_sample(args: argparse.Namespace, sample: str) -> dict:
         proc_out = processor(text=[text], images=[image], padding=False, return_tensors="pt")
         return {
             "text": text,
-            "input_ids": proc_out["input_ids"][0],            # [L]
-            "pixel_values": proc_out["pixel_values"],          # [N_patches, C*ph*pw]
-            "image_grid_thw": proc_out["image_grid_thw"],      # [num_images, 3]
+            "input_ids": proc_out["input_ids"][0],  # [L]
+            "pixel_values": proc_out["pixel_values"],  # [N_patches, C*ph*pw]
+            "image_grid_thw": proc_out["image_grid_thw"],  # [num_images, 3]
         }
     tokenizer = AutoTokenizer.from_pretrained(sub.hf_checkpoint, trust_remote_code=True)
     text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -332,9 +331,7 @@ def _process_sample(args: argparse.Namespace, sample: str) -> dict:
     }
 
 
-def _build_packed_inputs(
-    args: argparse.Namespace, dtype: torch.dtype, device: torch.device
-) -> dict:
+def _build_packed_inputs(args: argparse.Namespace, dtype: torch.dtype, device: torch.device) -> dict:
     """Build the Megatron forward kwargs for our two samples, picking the
     right path based on CP size — exactly mirroring ``relax/backends/megatron/
     data.py``:
@@ -431,10 +428,12 @@ def _build_packed_inputs(
 
 
 def _zigzag_local_slice(sample: torch.Tensor, cp_rank: int, cp_size: int) -> torch.Tensor:
-    """Replicate ``relax/backends/megatron/cp_utils.slice_with_cp`` for a
-    1-D tensor that is already padded to ``2*cp_size`` boundary. Used to
-    derive the per-rank target tokens that match the bridge's internal
-    THD-packed CP-zigzag-split of hidden states."""
+    """Replicate ``relax/backends/megatron/cp_utils.slice_with_cp`` for a 1-D
+    tensor that is already padded to ``2*cp_size`` boundary.
+
+    Used to derive the per-rank target tokens that match the bridge's internal
+    THD-packed CP-zigzag-split of hidden states.
+    """
     assert sample.size(0) % (2 * cp_size) == 0, sample.shape
     chunk_size = sample.size(0) // (2 * cp_size)
     s1, e1 = chunk_size * cp_rank, chunk_size * (cp_rank + 1)
@@ -445,9 +444,12 @@ def _zigzag_local_slice(sample: torch.Tensor, cp_rank: int, cp_size: int) -> tor
 def _cp_gather_zigzag_to_full(local: torch.Tensor, chunk_size: int) -> torch.Tensor:
     """Inverse of zigzag split: all-gather the per-rank ``[2*chunk_size]``
     pieces and reassemble the original padded sample of length
-    ``2*cp_size*chunk_size``. Every rank in the CP group ends up with the
-    same full tensor (we only consume it on the PP-last + TP-rank-0 path
-    afterwards, but the all-gather is cheap)."""
+    ``2*cp_size*chunk_size``.
+
+    Every rank in the CP group ends up with the same full tensor (we only
+    consume it on the PP-last + TP-rank-0 path afterwards, but the all-gather
+    is cheap).
+    """
     from megatron.core import mpu
 
     cp_group = mpu.get_context_parallel_group()
@@ -498,9 +500,7 @@ def _build_megatron_model(args: argparse.Namespace, dtype: torch.dtype):
     return model, bridge
 
 
-def _compute_local_per_pos_logprob(
-    logits: torch.Tensor, local_targets: torch.Tensor
-) -> torch.Tensor:
+def _compute_local_per_pos_logprob(logits: torch.Tensor, local_targets: torch.Tensor) -> torch.Tensor:
     """``logits``: ``[s_local, 1, v/tp]`` from GPTModel parallel_output=True.
     ``local_targets``: ``[s_local]`` already CP-zigzag-split. Returns
     ``[s_local]`` per-position logprob = log P(local_targets[t] | context).
@@ -515,9 +515,7 @@ def _compute_local_per_pos_logprob(
     return -ce.squeeze(1)  # [s_local]
 
 
-def _per_sample_gathered_logprobs(
-    logits: torch.Tensor, packed: dict, args: argparse.Namespace
-) -> list[torch.Tensor]:
+def _per_sample_gathered_logprobs(logits: torch.Tensor, packed: dict, args: argparse.Namespace) -> list[torch.Tensor]:
     """End-to-end last-PP-stage logprob computation:
 
     1. Build shifted targets per sample (target[t] = sample[t+1]), pad-right.
@@ -527,7 +525,8 @@ def _per_sample_gathered_logprobs(
 
     Returns a list of length-``padded_lens[i]`` CPU float tensors, one per
     sample. After this every rank in the CP group has the same data; outside
-    the last PP stage this function is not called."""
+    the last PP stage this function is not called.
+    """
     cp_size = args.cp_size
     from megatron.core import mpu
 
@@ -578,7 +577,9 @@ def _per_sample_gathered_logprobs(
 
 def run_megatron_packed(args: argparse.Namespace, dump_dir: Path) -> None:
     """All-rank Megatron packed forward + per-sample logprob gather.
-    Rank 0 writes the per-sample dumps."""
+
+    Rank 0 writes the per-sample dumps.
+    """
     from megatron.core import mpu
     from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
 
@@ -638,6 +639,7 @@ def run_megatron_packed(args: argparse.Namespace, dump_dir: Path) -> None:
             # out of forward_data_store on the last PP stage.
             try:
                 from megatron.core import mpu as _mpu
+
                 print(
                     f"[rank{dist.get_rank()}] loss_func entered: "
                     f"logits.shape={tuple(logits.shape)} "
@@ -647,15 +649,14 @@ def run_megatron_packed(args: argparse.Namespace, dump_dir: Path) -> None:
                 )
                 per_sample = _per_sample_gathered_logprobs(logits, packed, args)
                 print(
-                    f"[rank{dist.get_rank()}] loss_func gathered ok: "
-                    f"sample_lens={[t.shape[0] for t in per_sample]}",
+                    f"[rank{dist.get_rank()}] loss_func gathered ok: sample_lens={[t.shape[0] for t in per_sample]}",
                     flush=True,
                 )
             except Exception as e:
                 import traceback
+
                 print(
-                    f"[rank{dist.get_rank()}] loss_func RAISED: {type(e).__name__}: {e}\n"
-                    + traceback.format_exc(),
+                    f"[rank{dist.get_rank()}] loss_func RAISED: {type(e).__name__}: {e}\n" + traceback.format_exc(),
                     flush=True,
                 )
                 raise
@@ -688,9 +689,9 @@ def run_megatron_packed(args: argparse.Namespace, dump_dir: Path) -> None:
         )
     except Exception as e:
         import traceback
+
         print(
-            f"[rank{rank}] forward_backward_func RAISED: {type(e).__name__}: {e}\n"
-            + traceback.format_exc(),
+            f"[rank{rank}] forward_backward_func RAISED: {type(e).__name__}: {e}\n" + traceback.format_exc(),
             flush=True,
         )
         raise
@@ -713,17 +714,10 @@ def run_megatron_packed(args: argparse.Namespace, dump_dir: Path) -> None:
     # certain build combos. All ranks already know ``padded_lens`` from
     # ``_build_packed_inputs`` so no metadata round-trip is needed.
     src_rank = (args.pp_size - 1) * args.tp_size * args.cp_size  # order tp-cp-ep-dp-pp
-    is_src = (
-        is_last_pp
-        and mpu.get_tensor_model_parallel_rank() == 0
-        and mpu.get_context_parallel_rank() == 0
-    )
+    is_src = is_last_pp and mpu.get_tensor_model_parallel_rank() == 0 and mpu.get_context_parallel_rank() == 0
     if is_src:
         local_per_sample = forward_data_store[0]["per_sample_logprobs"]
-        print(
-            f"[rank{rank}] src gather complete: "
-            f"lens={[t.shape[0] for t in local_per_sample]}"
-        )
+        print(f"[rank{rank}] src gather complete: lens={[t.shape[0] for t in local_per_sample]}")
 
     per_sample_full: list[torch.Tensor] = []
     for i, padded_len in enumerate(packed["padded_lens"]):

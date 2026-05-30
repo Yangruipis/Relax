@@ -1,27 +1,19 @@
 # Copyright (c) 2026 Relax Authors. All Rights Reserved.
 
-import os
 from typing import List, Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint
+from torch.nn import LayerNorm
+from transformers.modeling_utils import PreTrainedModel
 
+from relax.models.dots_ocr.configuration import DotsVisionConfig
 from relax.utils.logging_utils import get_logger
 
 
 logger = get_logger(__name__)
-logger.info(f"[dbg] relax.models.dots_ocr.vision TOP-OF-MODULE pid={os.getpid()}")
-
-logger.info("[dbg] importing torch.nn.LayerNorm + transformers.PreTrainedModel")
-from torch.nn import LayerNorm  # noqa: E402
-from transformers.modeling_utils import PreTrainedModel  # noqa: E402
-
-logger.info("[dbg] importing relax.models.dots_ocr.configuration.DotsVisionConfig (vision.py)")
-from relax.models.dots_ocr.configuration import DotsVisionConfig  # noqa: E402
-
-logger.info("[dbg] relax.models.dots_ocr.vision module IMPORT COMPLETE (flash_attn deferred to call site)")
 
 
 def _flash_attn_varlen_func(*args, **kwargs):
@@ -283,43 +275,22 @@ class DotsVisionTransformer(PreTrainedModel):
         return rotary_pos_emb_full[pos_ids].flatten(1)
 
     def forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tensor, bf16: bool = True) -> torch.Tensor:
-        verbose = getattr(self, "_dbg_call_count", 0) < 5
-        if verbose:
-            logger.info(
-                f"[dbg] DotsVisionTransformer.forward call#{getattr(self, '_dbg_call_count', 0)} "
-                f"hidden_states={tuple(hidden_states.shape)} grid_thw={tuple(grid_thw.shape)} "
-                f"n_blocks={len(self.blocks)} training={self.training}"
-            )
-        self._dbg_call_count = getattr(self, "_dbg_call_count", 0) + 1
-
         if bf16:
             hidden_states = hidden_states.bfloat16()
         hidden_states = self.patch_embed(hidden_states, grid_thw)
-        if verbose:
-            logger.info(f"[dbg] vision after patch_embed: {tuple(hidden_states.shape)}")
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
         cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
             dim=0,
             dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
         )
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
-        if verbose:
-            logger.info(
-                f"[dbg] vision cu_seqlens={cu_seqlens.tolist()[:10]}... "
-                f"(len={cu_seqlens.numel()}) rotary={tuple(rotary_pos_emb.shape)}"
-            )
-        for i, blk in enumerate(self.blocks):
+        for blk in self.blocks:
             if self.gradient_checkpointing and self.training:
                 hidden_states = self._gradient_checkpointing_func(
                     blk.__call__, hidden_states, cu_seqlens, rotary_pos_emb, use_reentrant=False
                 )
             else:
                 hidden_states = blk(hidden_states, cu_seqlens=cu_seqlens, rotary_pos_emb=rotary_pos_emb)
-            if verbose and (i == 0 or i == len(self.blocks) - 1):
-                logger.info(f"[dbg] vision after blk[{i}]: {tuple(hidden_states.shape)}")
         if self.config.post_norm:
             hidden_states = self.post_trunk_norm(hidden_states)
-        out = self.merger(hidden_states)
-        if verbose:
-            logger.info(f"[dbg] DotsVisionTransformer.forward DONE -> {tuple(out.shape)}")
-        return out
+        return self.merger(hidden_states)

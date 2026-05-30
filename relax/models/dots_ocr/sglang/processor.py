@@ -9,30 +9,21 @@ the dots-native ``<|img|><|imgpad|><|endofimg|>`` token triple, NOT Qwen-VL's
 (vision_start_token_id, …) that don't exist on dots.mocr's hf_config.
 """
 
-import os
 import re
 from typing import Dict, List, Union
 
-from relax.utils.logging_utils import get_logger
-
-_p_logger = get_logger(__name__)
-_p_logger.info(f"[dbg] relax.models.dots_ocr.sglang.processor TOP-OF-MODULE pid={os.getpid()}")
-
-_p_logger.info("[dbg] importing sglang BaseMultimodalProcessor + MultimodalSpecialTokens")
-from sglang.srt.multimodal.processors.base_processor import (  # noqa: E402
+from sglang.srt.multimodal.processors.base_processor import (
     BaseMultimodalProcessor,
     MultimodalSpecialTokens,
 )
 
-_p_logger.info("[dbg] importing relax.models.dots_ocr.sglang.model.DotsOCRForCausalLM")
-from relax.models.dots_ocr.sglang.model import DotsOCRForCausalLM  # noqa: E402
+from relax.models.dots_ocr.sglang.model import DotsOCRForCausalLM
 
 
 class DotsOCRImageProcessor(BaseMultimodalProcessor):
     models = [DotsOCRForCausalLM]
 
     def __init__(self, hf_config, server_args, _processor, *args, **kwargs):
-        _p_logger.info(f"[dbg] DotsOCRImageProcessor.__init__ START pid={os.getpid()}")
         super().__init__(hf_config, server_args, _processor, *args, **kwargs)
 
         self.IMAGE_TOKEN = "<|img|><|imgpad|><|endofimg|>"
@@ -57,7 +48,6 @@ class DotsOCRImageProcessor(BaseMultimodalProcessor):
             image_token_id=self.image_token_id,
             image_token_regex=self.IMAGE_TOKEN_REGEX,
         ).build(_processor)
-        _p_logger.info(f"[dbg] DotsOCRImageProcessor.__init__ DONE pid={os.getpid()}")
 
     async def process_mm_data_async(
         self,
@@ -91,6 +81,3 @@ class DotsOCRImageProcessor(BaseMultimodalProcessor):
             "im_end_id": self.im_end_id,
             "im_token_id": self.image_token_id,
         }
-
-
-_p_logger.info("[dbg] relax.models.dots_ocr.sglang.processor module IMPORT COMPLETE")
