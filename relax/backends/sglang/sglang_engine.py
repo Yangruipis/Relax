@@ -91,6 +91,33 @@ def _launch_server_with_patch(server_args: ServerArgs):
     )
 
 
+def _resolve_external_model_arch(package_name):
+    """Scan an external model package for EntryClass and return architecture
+    name.
+
+    Mirrors SGLang's own import_model_classes() discovery logic: iterates over
+    all non-package modules in the given package and looks for an
+    ``EntryClass`` attribute.  Returns the ``__name__`` of the first discovered
+    class, or ``None`` if nothing is found.
+    """
+    import importlib
+    import pkgutil
+
+    package = importlib.import_module(package_name)
+    for _, name, ispkg in pkgutil.iter_modules(package.__path__, package_name + "."):
+        if not ispkg:
+            try:
+                module = importlib.import_module(name)
+            except Exception:
+                continue
+            if hasattr(module, "EntryClass"):
+                entry = module.EntryClass
+                if isinstance(entry, list):
+                    return entry[0].__name__
+                return entry.__name__
+    return None
+
+
 def launch_server_process(server_args: ServerArgs) -> multiprocessing.Process:
     from sglang.srt.entrypoints.http_server import launch_server
 
@@ -392,6 +419,21 @@ class SGLangEngine(RayActor):
         logger.info(f"Launch HttpServerEngineAdapter at: {self.server_host}:{self.server_port}")
         if getattr(self.args, "optimize_routing_replay", False):
             os.environ["RELAX_OPTIMIZE_ROUTING_REPLAY"] = "1"
+
+        # Set SGLang external model/processor package env vars so the spawned
+        # SGLang subprocess discovers and registers custom model implementations.
+        # Must be set before launch_server_process() spawns child process
+        # (multiprocessing start_method='spawn'), because the child inherits
+        # the parent's os.environ at spawn time.
+        external_pkg = getattr(self.args, "sglang_external_model_package", None)
+        if external_pkg:
+            os.environ["SGLANG_EXTERNAL_MODEL_PACKAGE"] = external_pkg
+            os.environ["SGLANG_EXTERNAL_MM_PROCESSOR_PACKAGE"] = external_pkg
+            arch = _resolve_external_model_arch(external_pkg)
+            if arch:
+                os.environ["SGLANG_EXTERNAL_MM_MODEL_ARCH"] = arch
+            logger.info(f"Set SGLANG_EXTERNAL_MODEL_PACKAGE={external_pkg}, SGLANG_EXTERNAL_MM_MODEL_ARCH={arch}")
+
         self.process = launch_server_process(ServerArgs(**server_args_dict))
 
         bootstrap_port = (

@@ -4,8 +4,9 @@ from dataclasses import dataclass
 from typing import Optional
 
 import torch
+from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.utils import preprocess_packed_seqs
 from megatron.bridge.utils.common_utils import hook_hf_module_setattr_for_tp_grad_sync
-from megatron.core import InferenceParams, tensor_parallel
+from megatron.core import InferenceParams, mpu, tensor_parallel
 from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.transformer import MegatronModule
@@ -162,7 +163,19 @@ class DotsOCRModel(MegatronModule):
         image_input_mask: torch.Tensor = None,
         **kwargs,
     ) -> torch.Tensor:
+        # Two input modes:
+        #   1) Regular thd: input_ids=[1, T_local_sliced], attention_mask=None,
+        #      packed_seq_params already CP-aware (cu_seqlens scaled by cp_size).
+        #      Used when cp_size==1 or for non-VL flow.
+        #   2) Bridge unsplit (CP>1, VL): input_ids=[B, T_max_padded],
+        #      attention_mask=[B, T_max_padded] bool, packed_seq_params has
+        #      cu_seqlens_padded aligned to tp*cp*2. We do THD pack + CP zigzag
+        #      split internally (mirrors Qwen3VLModel.forward), so vision embed
+        #      runs on the full unsliced sequence before splitting.
         assert inference_params is None, "Inference is not supported in Megatron DotsOCRModel"
+
+        unsplit_mode = packed_seq_params is not None and attention_mask is not None
+        cp_size = mpu.get_context_parallel_world_size()
 
         if self.pre_process:
             combined_embeddings = self.language_model.embedding(input_ids=input_ids, position_ids=None).clone()
@@ -180,19 +193,47 @@ class DotsOCRModel(MegatronModule):
                     vision_embeds.to(emb_bsh.device).type(emb_bsh.dtype),
                 )
                 combined_embeddings = emb_bsh.transpose(0, 1).contiguous()
+
+            if unsplit_mode and cp_size > 1:
+                # preprocess_packed_seqs: [B, T_max, h] -> [1, T_local_total, h]
+                # (THD-pack + CP-zigzag split per sample, padded to tp*cp*2,
+                # final unsqueeze(0) for SBH compatibility).
+                # The outer transpose(0, 1) gives [T_local_total, 1, h] SBH which
+                # matches what Megatron's TransformerBlock expects as decoder_input.
+                combined_embeddings = (
+                    preprocess_packed_seqs(
+                        combined_embeddings.transpose(0, 1).contiguous(),
+                        attention_mask,
+                        pre_process=True,
+                    )[0]
+                    .transpose(0, 1)
+                    .contiguous()
+                )
+
             if self.config.sequence_parallel:
                 combined_embeddings = tensor_parallel.scatter_to_sequence_parallel_region(combined_embeddings)
                 combined_embeddings = combined_embeddings.contiguous()
         else:
             combined_embeddings = None
 
-        if position_ids is None:
-            position_ids = self._position_ids(input_ids, attention_mask)
+        # In unsplit mode, attention uses cu_seqlens from packed_seq_params; the
+        # per-sample BSHD attention_mask must NOT be forwarded to language_model
+        # (TE thd path expects mask=None), and per-token position_ids derived
+        # from it would be misaligned with the THD-packed embeddings. Let rope
+        # derive positions from cu_seqlens instead.
+        if unsplit_mode:
+            forward_attention_mask = None
+            forward_position_ids = None
+        else:
+            forward_attention_mask = attention_mask
+            forward_position_ids = (
+                position_ids if position_ids is not None else self._position_ids(input_ids, attention_mask)
+            )
 
         return self.language_model(
             input_ids=None,
-            position_ids=position_ids,
-            attention_mask=attention_mask,
+            position_ids=forward_position_ids,
+            attention_mask=forward_attention_mask,
             decoder_input=combined_embeddings,
             labels=labels,
             loss_mask=loss_mask,

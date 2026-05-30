@@ -5,93 +5,74 @@
 # DotsOCR2 8xGPU multimodal GRPO training script.
 #
 # Usage:
-#   HF_CHECKPOINT=/path/to/dotsocr2 \
-#   PROMPT_SET=/path/to/train.parquet \
 #   bash scripts/training/multimodal/run-dotsocr2-8xgpu.sh [async|sync]
 
 set -ex
 set -o pipefail
 
-MODE=${1:-"async"}
+MODE=${1:-"sync"}
+
 now=$(date "+%Y-%m-%d-%H:%M:%S")
-echo "Current time: $now"
+echo "当前时间: $now"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+# Auto-source local environment when not launched via an external entrypoint
 if [ -z "${RELAX_ENTRYPOINT_MODE:-}" ]; then
     source "${SCRIPT_DIR}/../../entrypoint/local.sh"
 fi
 source "${MODEL_CONFIG_DIR}/dotsocr2.sh"
 
 PROJECT_NAME="${PROJECT_NAME:=Relax/dev/dotsocr2}"
-EXP_DIR="${MODEL_DIR:=${SCRIPT_DIR}/../../../../exps}"
-HF_CHECKPOINT="${HF_CHECKPOINT:=/Users/yangrui6/repos/models/rednote-hilab/dotsocr2}"
-SAVE_DIR="${SAVE_DIR:=${EXP_DIR}/dotsocr2_mcore_8xgpu}"
-PROMPT_SET="${PROMPT_SET:=${EXP_DIR}/dotsocr2/data/train.parquet}"
+EXP_DIR="${EXP_DIR:-${SCRIPT_DIR}/../../../../exps}"
+MODEL_DIR="${MODEL_DIR:-${EXP_DIR}}"
+DATA_DIR="${DATA_DIR:-${EXP_DIR}}"
 NUM_ROLLOUT="${NUM_ROLLOUT:=200}"
 
-export SGLANG_EXTERNAL_MODEL_PACKAGE="${SGLANG_EXTERNAL_MODEL_PACKAGE:-relax.models.dots_ocr.sglang}"
-export SGLANG_EXTERNAL_MM_PROCESSOR_PACKAGE="${SGLANG_EXTERNAL_MM_PROCESSOR_PACKAGE:-relax.models.dots_ocr.sglang}"
-export SGLANG_EXTERNAL_MM_MODEL_ARCH="${SGLANG_EXTERNAL_MM_MODEL_ARCH:-DotsOCRForCausalLM}"
-
-RUNTIME_ENV_JSON=$(python3 - <<'PY'
-import json
-import os
-import sys
-
-base = json.loads(os.environ.get("RUNTIME_ENV_JSON") or "{}")
-env_vars = base.setdefault("env_vars", {})
-for key in (
-    "SGLANG_EXTERNAL_MODEL_PACKAGE",
-    "SGLANG_EXTERNAL_MM_PROCESSOR_PACKAGE",
-    "SGLANG_EXTERNAL_MM_MODEL_ARCH",
-):
-    env_vars[key] = os.environ[key]
-sys.stdout.write(json.dumps(base))
-PY
-)
-export RUNTIME_ENV_JSON
-
 CKPT_ARGS=(
-   --hf-checkpoint "${HF_CHECKPOINT}"
-   --ref-load "${HF_CHECKPOINT}"
-   --save "${SAVE_DIR}"
-   --save-interval 100
+   --hf-checkpoint ${MODEL_DIR}/rednote-hilab/dots.mocr/
+   --ref-load ${MODEL_DIR}/rednote-hilab/dots.mocr/
+   --save ${EXP_DIR}/dotsocr2_mcore_8xgpu
+   --save-interval 1000
    --megatron-to-hf-mode bridge
 )
 
-SYSTEM_PROMPT="${SYSTEM_PROMPT:=You are a helpful OCR assistant.}"
+PROMPT_SET=${DATA_DIR}/multimodal-open-r1-8k-verified/data/train-00000-of-00001_converted_noextract.parquet
+SYSTEM_PROMPT="A conversation between User and Assistant. The user asks a question, and the Assistant solves it. The assistant first thinks about the reasoning process in the mind and then provides the user with the answer. The reasoning process and answer are enclosed within <think> </think> and <answer> </answer> tags, respectively, i.e., <think> reasoning process here </think><answer> answer here </answer>"
 
 ROLLOUT_ARGS=(
-   --prompt-data "${PROMPT_SET}"
-   --input-key "${INPUT_KEY:-prompt}"
-   --label-key "${LABEL_KEY:-label}"
+   --prompt-data ${PROMPT_SET}
+   --input-key prompt
+   --label-key label
    --apply-chat-template
-   --rm-type "${RM_TYPE:-f1}"
-   --num-rollout "${NUM_ROLLOUT}"
-   --rollout-batch-size "${ROLLOUT_BATCH_SIZE:-32}"
-   --n-samples-per-prompt "${N_SAMPLES_PER_PROMPT:-8}"
-   --rollout-max-response-len "${ROLLOUT_MAX_RESPONSE_LEN:-2048}"
-   --rollout-max-prompt-len "${ROLLOUT_MAX_PROMPT_LEN:-4096}"
-   --rollout-temperature "${ROLLOUT_TEMPERATURE:-0.8}"
-   --global-batch-size "${GLOBAL_BATCH_SIZE:-256}"
-   --multimodal-keys "${MULTIMODAL_KEYS:-{\"image\":\"image\"}}"
+   --rm-type openr1mm
+   --num-rollout ${NUM_ROLLOUT}
+   --rollout-batch-size 32
+   --n-samples-per-prompt 8
+   --rollout-max-response-len 2048
+   --rollout-max-prompt-len 4096
+   --rollout-temperature 0.8
+   --global-batch-size 256
+   --multimodal-keys '{"image":"image"}'
    --system-prompt "${SYSTEM_PROMPT}"
    --use-streaming-dataset
 )
 
 PERF_ARGS=(
-   --tensor-model-parallel-size "${TP_SIZE:-2}"
+   --tensor-model-parallel-size 1
    --sequence-parallel
-   --pipeline-model-parallel-size "${PP_SIZE:-1}"
-   --context-parallel-size "${CP_SIZE:-2}"
+   --pipeline-model-parallel-size 1
+   --context-parallel-size 1
    --expert-model-parallel-size 1
    --expert-tensor-parallel-size 1
+
    --recompute-granularity full
    --recompute-method uniform
    --recompute-num-layers 1
+
    --calculate-per-token-loss
    --use-dynamic-batch-size
-   --max-tokens-per-gpu "${MAX_TOKENS_PER_GPU:-8192}"
+   --max-tokens-per-gpu 8192
+
    --no-rope-fusion
 )
 
@@ -109,7 +90,7 @@ GRPO_ARGS=(
 
 OPTIMIZER_ARGS=(
    --optimizer adam
-   --lr "${LR:-1e-6}"
+   --lr 1e-6
    --lr-decay-style constant
    --weight-decay 0.1
    --adam-beta1 0.9
@@ -121,25 +102,29 @@ WANDB_ARGS=(
    --use-tensorboard
    --use-clearml
    --use-metrics-service
-   --tb-project-name "${PROJECT_NAME}"
-   --tb-experiment-name "dotsocr2-GRPO-gpu8-${MODE}-${now}"
+   --tb-project-name ${PROJECT_NAME}
+   --tb-experiment-name dotsocr2-GRPO-gpu8-${MODE}-${now}
 )
 
 SGLANG_ARGS=(
-   --rollout-num-gpus-per-engine "${ROLLOUT_NUM_GPUS_PER_ENGINE:-1}"
-   --sglang-mem-fraction-static "${SGLANG_MEM_FRACTION_STATIC:-0.75}"
+   --rollout-num-gpus-per-engine 1
+   --sglang-mem-fraction-static 0.75
+   # --sglang-external-model-package relax.models.dots_ocr.sglang
 )
 
 MISC_ARGS=(
+   # default dropout in megatron is 0.1
    --attention-dropout 0.0
    --hidden-dropout 0.0
+   # should be good for model performance
    --accumulate-allreduce-grads-in-fp32
    --attention-softmax-in-fp32
+   # need to comment this when using model with MLA
    --attention-backend flash
 )
 
 mkdir -p log
-if [ "${MODE}" = "async" ]; then
+if [ ${MODE} = "async" ]; then
     ray job submit ${RAY_NO_WAIT:+--no-wait} --address="http://127.0.0.1:8265" \
        ${WORKING_DIR:+--working-dir "${WORKING_DIR}"} \
        --runtime-env-json="${RUNTIME_ENV_JSON}" \
@@ -158,7 +143,7 @@ if [ "${MODE}" = "async" ]; then
        "${WANDB_ARGS[@]}" \
        "${PERF_ARGS[@]}" \
        "${SGLANG_ARGS[@]}" \
-       "${MISC_ARGS[@]}" 2>&1 | tee "log/dotsocr2-GRPO-gpu8-fully-async-${now}.log"
+       "${MISC_ARGS[@]}"  2>&1 | tee log/dotsocr2-GRPO-gpu8-async-${now}.log
 else
     ray job submit ${RAY_NO_WAIT:+--no-wait} --address="http://127.0.0.1:8265" \
        ${WORKING_DIR:+--working-dir "${WORKING_DIR}"} \
@@ -178,5 +163,5 @@ else
        "${WANDB_ARGS[@]}" \
        "${PERF_ARGS[@]}" \
        "${SGLANG_ARGS[@]}" \
-       "${MISC_ARGS[@]}" 2>&1 | tee "log/dotsocr2-GRPO-gpu8-sync-${now}.log"
+       "${MISC_ARGS[@]}"  2>&1 | tee log/dotsocr2-GRPO-gpu8-colocate-${now}.log
 fi
