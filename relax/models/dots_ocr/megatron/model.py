@@ -4,7 +4,12 @@ from dataclasses import dataclass
 from typing import Optional
 
 import torch
-from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.utils import preprocess_packed_seqs
+from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.utils import (
+    AllGatherVisionEmbeddings,
+    get_vision_cp_data,
+    preprocess_packed_seqs,
+    qwen3vl_cp_split,
+)
 from megatron.bridge.utils.common_utils import hook_hf_module_setattr_for_tp_grad_sync
 from megatron.core import InferenceParams, mpu, tensor_parallel
 from megatron.core.models.gpt.gpt_model import GPTModel
@@ -28,6 +33,7 @@ class DotsOCRTransformerConfig(TransformerConfig):
     fp16_lm_cross_entropy: bool = False
     rotary_percent: float = 1.0
     scatter_embedding_sequence_parallel: bool = False
+    vision_dp_when_cp: bool = False
 
 
 class DotsOCRGPTModel(GPTModel):
@@ -183,10 +189,38 @@ class DotsOCRModel(MegatronModule):
                 image_mask = image_input_mask
                 if image_mask is None:
                     image_mask = (input_ids == self.image_token_id).contiguous()
-                vision_embeds = self.vision_model(
-                    hidden_states=pixel_values,
-                    grid_thw=image_grid_thw,
-                )
+                if cp_size > 1 and self.config.vision_dp_when_cp:
+                    pixel_values, image_grid_thw, cp_img_num, images_padded = qwen3vl_cp_split(
+                        cp_size,
+                        pixel_values,
+                        image_grid_thw,
+                    )
+                    pixel_values, image_grid_thw, seqlen_on_cp_ranks = get_vision_cp_data(
+                        pixel_values,
+                        image_grid_thw,
+                        self.vision_model.spatial_merge_size**2,
+                        cp_img_num,
+                        images_padded,
+                        mpu.get_context_parallel_rank(),
+                        cp_size,
+                    )
+                if pixel_values.shape[0] > 0:
+                    vision_embeds = self.vision_model(
+                        hidden_states=pixel_values,
+                        grid_thw=image_grid_thw,
+                    )
+                else:
+                    vision_embeds = torch.zeros(
+                        (0, self.config.hidden_size),
+                        device=pixel_values.device,
+                        dtype=torch.bfloat16,
+                    )
+                if cp_size > 1 and self.config.vision_dp_when_cp:
+                    vision_embeds = AllGatherVisionEmbeddings.apply(
+                        vision_embeds,
+                        seqlen_on_cp_ranks,
+                        mpu.get_context_parallel_group(),
+                    )
                 emb_bsh = combined_embeddings.transpose(0, 1).contiguous()
                 emb_bsh = emb_bsh.masked_scatter(
                     image_mask.unsqueeze(-1).expand_as(emb_bsh),

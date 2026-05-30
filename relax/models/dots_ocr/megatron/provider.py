@@ -43,6 +43,7 @@ class DotsOCRModelProvider(GPTModelProvider):
     freeze_language_model: bool = False
     freeze_vision_model: bool = False
     freeze_vision_projection: bool = False
+    vision_dp_when_cp: bool = False
 
     def provide(self, pre_process=None, post_process=None, vp_stage=None):
         language_transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(
