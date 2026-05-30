@@ -112,6 +112,7 @@ Relax is designed for **omni-modal RL training** — text, vision, and audio in 
 | **Qwen3.6**    | 35B-A3B (MoE)     | Vision + Language     | Visual QA, image understanding, multimodal reasoning | Megatron |
 | **GLM5**       | 744B-A40B (MoE)   | Text                  | Math reasoning, code, multi-turn dialogue            | Megatron |
 | **Kimi K2.6**  | ~1T-A32B (MoE)    | Vision + Language     | Visual QA, multimodal reasoning; INT4 QAT training   | Megatron |
+| **dots.mcore** | [dots.mocr](https://huggingface.co/rednote-hilab/dots.mocr) | Vision + Language | OCR, document understanding, multimodal reasoning | Megatron |
 
 > 📖 New architectures are integrated via [Megatron Bridge](relax/backends/megatron/mbridge/) for automatic HF ↔ Megatron weight conversion.
 
