@@ -29,6 +29,11 @@ class DotsOCRModelProvider(GPTModelProvider):
     attention_softmax_in_fp32: bool = True
     scatter_embedding_sequence_parallel: bool = False
     share_embeddings_and_output_weights: bool = False
+    # GPTModelProvider defaults to "learned_absolute", which makes GPTModel skip
+    # building self.rotary_pos_emb — LM forward then runs with no positional
+    # encoding at all and silently produces garbage attention. dots.mocr is a
+    # Qwen2-arch model with RoPE, so this MUST be "rope".
+    position_embedding_type: str = "rope"
 
     language_max_sequence_length: int = 131072
     image_token_id: int = 151665
