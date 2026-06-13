@@ -243,6 +243,7 @@ export default defineConfig({
                 { text: 'Installation', link: '/en/guide/installation' },
                 { text: 'Quick Start', link: '/en/guide/quick-start' },
                 { text: 'Customize Training', link: '/en/guide/customize-training' },
+                { text: 'SFT Training', link: '/en/guide/sft-training' },
                 { text: 'Configuration', link: '/en/guide/configuration' }
               ]
             },
@@ -259,6 +260,7 @@ export default defineConfig({
               text: 'Advanced',
               items: [
                 { text: 'Fully Async Training', link: '/en/guide/fully-async-training' },
+                { text: 'Agentic Rollout', link: '/en/guide/agentic-rollout' },
                 { text: 'Hybrid Training Mode', link: '/en/guide/hybrid-training' },
                 { text: 'Elastic Rollout Scaling', link: '/en/guide/elastic-rollout' },
                 { text: 'Metrics Service', link: '/en/guide/metrics-service-detailed' },
@@ -345,6 +347,7 @@ export default defineConfig({
                 { text: '安装', link: '/zh/guide/installation' },
                 { text: '快速上手', link: '/zh/guide/quick-start' },
                 { text: '自定义训练', link: '/zh/guide/customize-training' },
+                { text: 'SFT 训练', link: '/zh/guide/sft-training' },
                 { text: '配置说明', link: '/zh/guide/configuration' }
               ]
             },
@@ -361,6 +364,7 @@ export default defineConfig({
               text: '进阶指南',
               items: [
                 { text: '全异步训练流水线', link: '/zh/guide/fully-async-training' },
+                { text: 'Agentic Rollout', link: '/zh/guide/agentic-rollout' },
                 { text: 'Hybrid 混合训练模式', link: '/zh/guide/hybrid-training' },
                 { text: '弹性 Rollout 扩缩容', link: '/zh/guide/elastic-rollout' },
                 { text: 'Metrics 服务', link: '/zh/guide/metrics-service-detailed' },

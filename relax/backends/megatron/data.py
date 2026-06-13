@@ -21,7 +21,7 @@ from relax.utils.logging_utils import get_logger
 from relax.utils.metrics.metric_utils import compute_pass_rate, compute_rollout_step
 from relax.utils.timer import Timer
 from relax.utils.training import train_metric_utils
-from relax.utils.training.flops_utils import calculate_fwd_flops
+from relax.utils.training.flops_counter import FlopsCounter
 from relax.utils.types import RolloutBatch
 
 from .cp_utils import get_sum_of_sample_mean, maybe_padded_total_lengths, slice_with_cp
@@ -117,6 +117,7 @@ def get_batch(
     pad_multiplier: int = 128,
     qkv_format: str = "thd",
     allgather_cp: bool = False,
+    is_vl_model: bool = False,
 ) -> dict[str, torch.Tensor | PackedSeqParams | list[torch.Tensor] | None]:
     """Generate a CP-ready micro-batch with packed sequence parameters.
 
@@ -182,8 +183,11 @@ def get_batch(
         # inputs and a matching packed_seq_params so the caller-side cu_seqlens
         # agrees with what the bridge derives from attention_mask.
         # Mirrors verl's build_vlm_attn_mask_thd + preprocess_thd_engine.
-        is_vl_model = batch.get("multimodal_train_inputs") is not None
-        needs_unsplit_input = is_vl_model or getattr(get_args(), "uses_unsplit_forward", False)
+        # Routed by `is_vl_model` (set from hf_config) rather than presence of
+        # multimodal_train_inputs, so VL models with text-only batches still
+        # land here — bridge skips vision embedding when image_grid_thw is None.
+        has_mm_inputs = batch.get("multimodal_train_inputs") is not None
+        needs_unsplit_input = is_vl_model or has_mm_inputs or getattr(get_args(), "uses_unsplit_forward", False)
         if needs_unsplit_input and cp_size > 1:
             tp_size = mpu.get_tensor_model_parallel_world_size()
             align_size = tp_size * cp_size * 2
@@ -272,22 +276,28 @@ def get_batch(
     batch["tokens"] = tokens
     batch["packed_seq_params"] = packed_seq_params
 
-    # loss masks
-    loss_masks = []
+    from relax.utils.sft_utils import align_loss_mask_for_sft
+
+    loss_masks: list[torch.Tensor] = []
+    per_sample_loss_masks: list[torch.Tensor] = []
+    full_per_sample_loss_masks: list[torch.Tensor] = []
     for loss_mask, total_length, response_length in zip(
-        batch["loss_masks"],
-        batch["total_lengths"],
-        batch["response_lengths"],
-        strict=True,
+        batch["loss_masks"], batch["total_lengths"], batch["response_lengths"], strict=True
     ):
-        prompt_length = total_length - response_length
-        # Align mask to token stream positions (prompt_length-1 left pad, 1 right pad)
-        loss_mask = F.pad(loss_mask, (prompt_length - 1, 1), value=0)
-        if allgather_cp:
-            loss_masks.append(loss_mask)
-            continue
-        loss_mask = slice_with_cp(loss_mask, 0, qkv_format, max_seqlen)
+        if response_length == total_length:
+            loss_mask = align_loss_mask_for_sft(loss_mask)
+            per_sample_loss_masks.append(loss_mask)
+        else:
+            per_sample_loss_masks.append(loss_mask)
+            prompt_length = total_length - response_length
+            loss_mask = F.pad(loss_mask, (prompt_length - 1, 1), value=0)
+        # Pre-CP, per-sample full-length mask used for the bridge-aligned MTP
+        # labels/mask below (built after this loop closes).
+        full_per_sample_loss_masks.append(loss_mask)
+        if not allgather_cp:
+            loss_mask = slice_with_cp(loss_mask, 0, qkv_format, max_seqlen)
         loss_masks.append(loss_mask)
+    batch["loss_masks"] = per_sample_loss_masks
 
     if qkv_format == "bshd":
         loss_masks = torch.stack(loss_masks)
@@ -303,6 +313,32 @@ def get_batch(
 
     assert loss_masks.shape == tokens.shape, f"loss_masks.shape: {loss_masks.shape}, tokens.shape: {tokens.shape}"
     batch["full_loss_masks"] = loss_masks
+
+    # Bridge-aligned MTP labels/loss_mask for the VL+THD+CP unsplit path.
+    # Legacy `batch["tokens"]` / `batch["full_loss_masks"]` use per-sample
+    # align=2*cp_size + global pad, but the bridge's preprocess_packed_seqs
+    # repacks hidden_states with per-sample align=tp*cp*2 (matching
+    # vlm_packed_seq_params). The two per-rank lengths diverge, so MTP labels
+    # must mirror the bridge layout: per-sample pad to seqlens_padded[i],
+    # then CP-slice with the standard 2-chunk pattern, then concat.
+    if qkv_format == "thd" and "vlm_packed_seq_params" in batch and getattr(get_args(), "enable_mtp_training", False):
+        orig_tokens = batch["unconcat_tokens"]
+        seqlens_padded_list = batch["padded_total_lengths"]
+        mtp_label_chunks: list[torch.Tensor] = []
+        mtp_loss_chunks: list[torch.Tensor] = []
+        for sample_tokens, sample_mask, pad_to in zip(
+            orig_tokens, full_per_sample_loss_masks, seqlens_padded_list, strict=True
+        ):
+            pad_to = int(pad_to)
+            t_padded = F.pad(sample_tokens, (0, pad_to - sample_tokens.size(0)), value=pad_token_id)
+            m_padded = F.pad(sample_mask, (0, pad_to - sample_mask.size(0)), value=0)
+            chunk = pad_to // (2 * cp_size)
+            s1, e1 = chunk * cp_rank, chunk * (cp_rank + 1)
+            s2, e2 = chunk * (2 * cp_size - cp_rank - 1), chunk * (2 * cp_size - cp_rank)
+            mtp_label_chunks.append(torch.cat([t_padded[s1:e1], t_padded[s2:e2]]))
+            mtp_loss_chunks.append(torch.cat([m_padded[s1:e1], m_padded[s2:e2]]))
+        batch["unsplit_mtp_labels"] = torch.cat(mtp_label_chunks).unsqueeze(0)
+        batch["unsplit_mtp_loss_mask"] = torch.cat(mtp_loss_chunks).unsqueeze(0)
 
     # Process multimodal training tensors if present
     multimodal_train_inputs = batch.get("multimodal_train_inputs", None)
@@ -875,7 +911,7 @@ def log_perf_data_fwd(args, rollout_id):
     tracking_utils.log(args, log_dict, step_key="actor_fwd/step")
 
 
-def log_perf_data(rollout_id: int, args: Namespace) -> None:
+def log_perf_data(rollout_id: int, args: Namespace, flops_counter: FlopsCounter | None = None) -> None:
     train_metric_utils.log_perf_data_raw(
         rollout_id=rollout_id,
         args=args,
@@ -884,9 +920,8 @@ def log_perf_data(rollout_id: int, args: Namespace) -> None:
             and mpu.is_pipeline_last_stage()
             and mpu.get_data_parallel_rank(with_context_parallel=True) == 0
         ),
-        compute_total_fwd_flops=lambda seq_lens: (
-            calculate_fwd_flops(seqlens=seq_lens, args=args) / dist.get_world_size() / 1e12
-        ),
+        flops_counter=flops_counter,
+        world_size=dist.get_world_size(),
     )
 
 

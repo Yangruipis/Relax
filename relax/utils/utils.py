@@ -11,6 +11,7 @@ import ray
 import torch
 from tensordict import TensorDict
 
+from relax.utils.device import get_ray_accelerator_name
 from relax.utils.logging_utils import get_logger
 from relax.utils.misc import load_function
 from relax.utils.types import Sample
@@ -18,6 +19,76 @@ from relax.utils.types import Sample
 
 logger = get_logger(__name__)
 CURRENT_ROLLOUT_BATCH = []
+
+
+def _extract_images_seqlens(multimodal_train_inputs) -> list[int]:
+    """Extract per-image ViT token counts from multimodal_train_inputs.
+
+    Accepts either:
+      - ``list[dict | None]``: per-sample dicts (pre-batch format)
+      - ``dict``: concatenated tensors (post-``prepare_batch`` format)
+
+    For each image, the ViT input sequence length = H * W (repeated T times
+    along the temporal axis).
+    """
+    if isinstance(multimodal_train_inputs, dict):
+        grid_thw = multimodal_train_inputs.get("image_grid_thw")
+        if grid_thw is None:
+            return []
+        if isinstance(grid_thw, torch.Tensor):
+            seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0])
+            return seqlens.tolist()
+        return [int(h * w) for t, h, w in grid_thw for _ in range(int(t))]
+
+    images_seqlens: list[int] = []
+    for mm_input in multimodal_train_inputs:
+        if mm_input is None:
+            continue
+        grid_thw = mm_input.get("image_grid_thw")
+        if grid_thw is None:
+            continue
+        if isinstance(grid_thw, torch.Tensor):
+            seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0])
+            images_seqlens.extend(seqlens.tolist())
+        elif isinstance(grid_thw, (list, np.ndarray)):
+            for t, h, w in grid_thw:
+                images_seqlens.extend([int(h * w)] * int(t))
+    return images_seqlens
+
+
+def _extract_audio_seqlens(multimodal_train_inputs) -> list[int]:
+    """Extract per-audio raw mel feature lengths from multimodal_train_inputs.
+
+    Accepts either:
+      - ``list[dict | None]``: per-sample dicts (pre-batch format)
+      - ``dict``: concatenated tensors (post-``prepare_batch`` format)
+
+    Returns the effective mel frame count for each audio clip, derived from
+    ``feature_attention_mask.sum(-1)``.
+    """
+    if isinstance(multimodal_train_inputs, dict):
+        feat_mask = multimodal_train_inputs.get("feature_attention_mask")
+        if feat_mask is None:
+            return []
+        if isinstance(feat_mask, torch.Tensor):
+            return feat_mask.sum(-1).tolist()
+        return torch.tensor(feat_mask).sum(-1).tolist()
+
+    audio_seqlens: list[int] = []
+    for mm_input in multimodal_train_inputs:
+        if mm_input is None:
+            continue
+        feat_mask = mm_input.get("feature_attention_mask")
+        if feat_mask is None:
+            continue
+        if isinstance(feat_mask, torch.Tensor):
+            lengths = feat_mask.sum(-1)
+            audio_seqlens.extend(lengths.tolist())
+        elif isinstance(feat_mask, (list, np.ndarray)):
+            feat_mask_t = torch.tensor(feat_mask)
+            lengths = feat_mask_t.sum(-1)
+            audio_seqlens.extend(lengths.tolist())
+    return audio_seqlens
 
 
 def convert_samples_to_train_data(args: Any, samples: list[Sample] | list[list[Sample]]):
@@ -282,6 +353,28 @@ def post_process_env(args, env):
     python_paths = list(dict.fromkeys(python_paths))
 
     env["env_vars"]["PYTHONPATH"] = ":".join(python_paths)
+
+    # Propagate the extension-module hook so every Ray actor that loads
+    # ``relax.backends.megatron`` re-runs the imports listed here (analogue
+    # of ``--custom-generate-function-path``). Downstream packages register
+    # Megatron-Bridge converters / family-token tables this way.
+    extra_modules = os.environ.get("RELAX_EXTRA_MODULES")
+    if extra_modules and "RELAX_EXTRA_MODULES" not in env["env_vars"]:
+        env["env_vars"]["RELAX_EXTRA_MODULES"] = extra_modules
+
+    # Generic env-var passthrough for overlay packages. Comma-separated list
+    # of env-var names the driver wants forwarded to every Ray actor. Each
+    # name is copied from the driver's os.environ; missing names are
+    # silently skipped.
+    propagate_list = os.environ.get("RELAX_PROPAGATE_ENV_VARS", "")
+    for var in propagate_list.split(","):
+        var = var.strip()
+        if not var or var in env["env_vars"]:
+            continue
+        val = os.environ.get(var)
+        if val is not None:
+            env["env_vars"][var] = val
+
     logger.info(f"Ray runtime env: {env['env_vars']}")
     return env
 
@@ -444,9 +537,10 @@ def get_serve_url(route_prefix: str = "") -> str:
 def recovery_load_path(args: Namespace) -> Optional[str]:
     """Determine the checkpoint path to load for recovery, if applicable."""
     if args.save is not None and os.path.exists(os.path.join(args.save, "latest_checkpointed_iteration.txt")):
-        args.no_load_optim = False
-        args.no_load_rng = False
+        args.no_load_optim = args.no_save_optim
+        args.no_load_rng = args.no_save_rng
         args.finetune = False
+        args.start_rollout_id = None
         args.load = args.save
 
 
@@ -465,3 +559,13 @@ def compute_dp_size(config) -> int:
             f"Computed dp_size={dp_size} is invalid. actor_total_gpus={actor_total_gpus}, tp={tp}, pp={pp}, cp={cp}"
         )
     return dp_size
+
+
+def get_ray_accelerator_kwargs(num_accelerator: int | float) -> Dict:
+    accelerator_kwargs = {}
+    accelerator_name = get_ray_accelerator_name()
+    if accelerator_name == "GPU":
+        accelerator_kwargs["num_gpus"] = num_accelerator
+    else:
+        accelerator_kwargs["resources"] = {"NPU": num_accelerator}
+    return accelerator_kwargs

@@ -70,8 +70,34 @@ echo "=== Reserving sglang port ranges on all GPU nodes ==="
 #   30000-30300 — secondary safe zone (fallback if sglang port_base needs adjustment)
 python ${DIR}/../tools/run_on_each_ray_node.py --timeout 30 "sysctl -w net.ipv4.ip_local_reserved_ports=15000-16800,30000-30300" || echo "reserve_ports failed (non-fatal)"
 
-# kill old tasks
-ray job list | grep RUNNING | grep -v job_id=None | grep -oP "submission_id='\\K[^']+" | xargs ray job stop || true
+# kill old tasks, but never kill ourselves.
+# Resolve our own submission_id with two strategies:
+#   1) RAY_JOB_SUBMISSION_ID env var — set by Ray ≥ 2.6 via `ray job submit`,
+#      but empty on some platforms (e.g. QS wrappers that strip env vars).
+#   2) Fallback: Ray's job_supervisor redirects driver stdout/stderr to
+#      /tmp/ray/session_latest/logs/job-driver-<sub_id>.log, so readlink fd 1/2
+#      recovers <sub_id>.
+# If both fail, SKIP cleanup — never kill blindly, because that suicides the job.
+SELF_SUB_ID="${RAY_JOB_SUBMISSION_ID:-}"
+if [ -z "$SELF_SUB_ID" ]; then
+    for _fd in 1 2; do
+        _path=$(readlink -f "/proc/self/fd/${_fd}" 2>/dev/null || true)
+        if [[ "$_path" =~ /job-driver-(.+)\.(log|out|err)$ ]]; then
+            SELF_SUB_ID="${BASH_REMATCH[1]}"
+            break
+        fi
+    done
+fi
+echo "=== Own ray submission_id: ${SELF_SUB_ID:-<unknown>} ==="
+if [ -z "$SELF_SUB_ID" ]; then
+    echo "WARNING: could not detect own submission_id; skipping old-job cleanup to avoid suicide."
+else
+    ray job list \
+      | grep RUNNING \
+      | grep -oP "submission_id='\\K[^']+" \
+      | grep -vFx "$SELF_SUB_ID" \
+      | xargs --no-run-if-empty -n1 ray job stop || true
+fi
 
 set -x
 
@@ -122,6 +148,7 @@ NVSHMEM_LIB_PATH="${NVSHMEM_LIB_PATH:-/usr/local/lib/python3.12/dist-packages/nv
 TORCH_LIB_PATH="${TORCH_LIB_PATH:-/usr/local/lib/python3.12/dist-packages/torch/lib}"
 CURRENT_LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}${NVSHMEM_LIB_PATH}:${TORCH_LIB_PATH}"
 
+# Cap OMP/MKL/OpenBLAS threads (default 24) to avoid CPU oversubscription when colocating multiple Ray actors per node.
 export RUNTIME_ENV_JSON="{
 \"worker_process_setup_hook\": \"relax.utils.logging_utils.install_asyncio_noise_filter\",
 \"env_vars\": {
@@ -129,6 +156,9 @@ export RUNTIME_ENV_JSON="{
    \"PYTHONPATH\": \"${PYTHONPATH}\",
    \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
    \"RAY_OVERRIDE_JOB_RUNTIME_ENV\": \"1\",
+   \"OMP_NUM_THREADS\": \"${OMP_NUM_THREADS:-24}\",
+   \"MKL_NUM_THREADS\": \"${MKL_NUM_THREADS:-24}\",
+   \"OPENBLAS_NUM_THREADS\": \"${OPENBLAS_NUM_THREADS:-24}\",
    \"NCCL_NVLS_ENABLE\": \"${HAS_NVLINK}\",
    \"MASTER_ADDR\": \"${MASTER_ADDR}\",
    \"RAY_DEBUG\": \"${RAY_DEBUG}\",
