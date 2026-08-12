@@ -117,7 +117,7 @@ Relax 专为**全模态强化学习训练**设计 —— 文本、视觉、音�
 | **Qwen3.6**    | 35B-A3B (MoE)                                               | 视觉 + 语言        | 视觉问答、图像理解、多模态推理           | Megatron |
 | **GLM5**       | 744B-A40B (MoE)                                             | 文本               | 数学推理、代码生成、多轮对话             | Megatron |
 | **Kimi K2.6**  | ~1T-A32B (MoE)                                              | 视觉 + 语言        | 视觉问答、多模态推理；支持 INT4 QAT 训练 | Megatron |
-| **dots.mcore** | [dots.mocr](https://huggingface.co/rednote-hilab/dots.mocr) | 视觉 + 语言        | OCR、文档理解、多模态推理                | Megatron |
+| **dots.mocr**  | [dots.mocr](https://huggingface.co/rednote-hilab/dots.mocr) | 视觉 + 语言        | OCR、文档理解、多模态推理                | Megatron |
 
 > 📖 新模型架构通过 [Megatron Bridge](relax/backends/megatron/mbridge/) 接入，自动完成 HF ↔ Megatron 权重转换。
 
