@@ -43,9 +43,10 @@ def _install_fakes(monkeypatch, recorded):
         def __init__(self):
             # A safetensors-backed source, as the vision supplement expects to find.
             self.hf_pretrained = SimpleNamespace(
+                save_artifacts=lambda *a, **k: None,
                 state=SimpleNamespace(
                     source=SimpleNamespace(key_to_filename_map={}, save_generator=lambda *a, **k: None)
-                )
+                ),
             )
 
         def save_hf_pretrained(self, model, path, strict):
@@ -105,7 +106,7 @@ def test_bf16_export_uses_original_reference_and_keeps_strict(monkeypatch, tmp_p
     factory = AutoBridge.from_hf_pretrained
 
     def record_reference(path, **kwargs):
-        recorded["reference"] = path
+        recorded.setdefault("references", []).append(path)
         return factory(path, **kwargs)
 
     monkeypatch.setattr(AutoBridge, "from_hf_pretrained", record_reference)
@@ -113,7 +114,7 @@ def test_bf16_export_uses_original_reference_and_keeps_strict(monkeypatch, tmp_p
     monkeypatch.setattr(hf_export, "reference_expects_mtp", lambda path: False)
     monkeypatch.setattr(hf_export, "reference_expects_vision", lambda path: False)
     model_mod.save_hf_model(_args(tmp_path), rollout_id=1, model=_model(vision=False))
-    assert recorded == {"reference": "/original-bf16", "strict": True}
+    assert recorded == {"references": ["/original-bf16", "/tmp/fake-hf"], "strict": True}
 
 
 def test_vision_reference_with_text_only_model_keeps_strict(monkeypatch, tmp_path):

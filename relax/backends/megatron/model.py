@@ -1554,6 +1554,8 @@ def train(
                     state["exp_avg"].zero_()
                 if "exp_avg_sq" in state:
                     state["exp_avg_sq"].zero_()
+                if "momentum_buffer" in state:
+                    state["momentum_buffer"].zero_()
 
     if args.manual_gc:
         # Disable the default garbage collector and perform the collection manually.
@@ -2004,6 +2006,11 @@ def save_hf_model(args, rollout_id: int, model: Sequence[DDP], *, force_sync: bo
 
         export_reference = _hf_export_reference(args)
         bridge = AutoBridge.from_hf_pretrained(export_reference, trust_remote_code=True)
+        if export_reference != args.hf_checkpoint:
+            # Only shard keys come from ref_load; tokenizer, processor and templates
+            # must retain the actor checkpoint's semantics. Both bridges load lazily.
+            actor_bridge = AutoBridge.from_hf_pretrained(args.hf_checkpoint, trust_remote_code=True)
+            bridge.hf_pretrained.save_artifacts = actor_bridge.hf_pretrained.save_artifacts
 
         path.mkdir(parents=True, exist_ok=True)
 
