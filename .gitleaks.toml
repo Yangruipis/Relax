@@ -117,6 +117,7 @@ tags = ["hardware", "nvidia"]
 description = "Ignore scanner metadata and generated docs artifacts"
 paths = [
   '''\.gitleaks\.toml$''',
+  '''(?:^|/)\.gitleaksignore$''',
   '''docs/Dockerfile''',
   '''\.git/.*''',
   '''docs/\.vitepress/(dist|cache)/.*''',
