@@ -402,10 +402,10 @@ COPY docker/patch/flash-attention/56e48e3-fa4-isolated.patch \
     docker/patch/deepep/2.1.0-relax-namespace.patch \
     docker/patch/flash-qla/0.1.3-kkt-no-tma.patch \
     docker/scripts/record_qwen35_runtime.py \
-    docker/scripts/validate_b300_runtime.py \
+    docker/scripts/validate_blackwell_runtime.py \
     docker/patch/flash-attention/fa4-source-pins.json \
     docker/patch/cublas/13.3.0.5-library-pins.json /tmp/qwen35-build/
-RUN install -m 644 /tmp/qwen35-build/record_qwen35_runtime.py /tmp/qwen35-build/validate_b300_runtime.py /opt/relax/ && \
+RUN install -m 644 /tmp/qwen35-build/record_qwen35_runtime.py /tmp/qwen35-build/validate_blackwell_runtime.py /opt/relax/ && \
     cp /tmp/qwen35-build/fa4-source-pins.json /tmp/fa4-source-pins.json && \
     cp /tmp/qwen35-build/13.3.0.5-library-pins.json /tmp/cublas-library-pins.json && \
     sed -i '/^nvidia-cutlass-dsl==/d' "$PIP_CONSTRAINT" && \
@@ -441,7 +441,7 @@ RUN git init /tmp/FlashQLA && cd /tmp/FlashQLA && \
 
 # HybridEP is built for a single NVLink domain; NCCL/EFA still handles other collectives.
 # Validate source contracts at build time; CUDA imports/numerics require a GPU run.
-RUN python /opt/relax/validate_b300_runtime.py && rm -r /tmp/qwen35-build
+RUN python /opt/relax/validate_blackwell_runtime.py && rm -r /tmp/qwen35-build
 ENV FI_PROVIDER=efa \
     NCCL_NET_PLUGIN=/opt/amazon/ofi-nccl/lib/libnccl-net-ofi.so \
     TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
