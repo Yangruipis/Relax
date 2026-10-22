@@ -102,6 +102,114 @@ tags = ["internal", "ip", "private"]
     '''^192\.168\.1\.100$''',
   ]
 
+# NVIDIA model names disclose hardware choices; use memory + architecture profiles.
+# Existing content is bypassed below by exact path AND exact original line.
+# Different line text or paths require review; line numbers are not significant.
+[[rules]]
+id = "nvidia-gpu-model"
+description = "Use GPU memory and architecture instead of concrete NVIDIA models"
+regex = '''(?im)(?:^|[^a-z0-9\r\n])(?:[0-9]+[ \t]*[x×*][ \t]*)?((?:gb[23]00|b[123]00|h(?:20|100|200|800)|a(?:100|800|40)|l(?:20y?|40s?)|v100|rtx[ _-]?[0-9]{4}(?:[ _-]?ti)?))(?:$|[^a-z0-9\r\n]|[x×*][ \t]*[0-9]+)'''
+secretGroup = 1
+tags = ["hardware", "nvidia"]
+
+  # Frozen baseline from ef3091ba; do not refresh it from the working tree.
+  [[rules.allowlists]]
+  condition = "AND"
+  regexTarget = "line"
+  paths = ['''^\.github/ISSUE_TEMPLATE/bug_report\.md$''']
+  regexes = [
+    '''(?m)^- \*\*GPU\*\*: \(e\.g\., 8x A100 80GB\)$''',
+  ]
+
+  [[rules.allowlists]]
+  condition = "AND"
+  regexTarget = "line"
+  paths = ['''^\.github/workflows/integration-test\.yml$''']
+  regexes = [
+    '''(?m)^    runs-on: \[self-hosted, linux, x64, h20, gpu\]$''',
+  ]
+
+  [[rules.allowlists]]
+  condition = "AND"
+  regexTarget = "line"
+  paths = ['''^\.github/workflows/unittest\.yml$''']
+  regexes = [
+    '''(?m)^    name: Unit Tests \(H20, 4 GPUs\)$''',
+    '''(?m)^    runs-on: \[self-hosted, linux, x64, h20, gpu\]$''',
+  ]
+
+  [[rules.allowlists]]
+  condition = "AND"
+  regexTarget = "line"
+  paths = ['''^docs/draft/distributed_checkpoint_service\.md$''']
+  regexes = [
+    '''(?m)^        "gpu_model": "A100",$''',
+  ]
+
+  [[rules.allowlists]]
+  condition = "AND"
+  regexTarget = "line"
+  paths = ['''^relax/utils/external/command_utils\.py$''']
+  regexes = [
+    '''(?m)^    "GB200": "Blackwell",$''',
+    '''(?m)^    "GB200": 4,$''',
+    '''(?m)^    "GB300": "Blackwell",$''',
+    '''(?m)^    "GB300": 4,$''',
+    '''(?m)^    "H100": "Hopper",$''',
+    '''(?m)^    "H100": 8,$''',
+  ]
+
+  [[rules.allowlists]]
+  condition = "AND"
+  regexTarget = "line"
+  paths = ['''^relax/utils/training/flops_counter\.py$''']
+  regexes = [
+    '''(?m)^    "A100": 312e12,$''',
+    '''(?m)^    "A40": 149\.7e12,$''',
+    '''(?m)^    "A800": 312e12,$''',
+    '''(?m)^    "B200": 2\.25e15,$''',
+    '''(?m)^    "B300": 2\.25e15,$''',
+    '''(?m)^    "GB200": 2\.5e15,$''',
+    '''(?m)^    "GB300": 2\.5e15,$''',
+    '''(?m)^    "H100": 989e12,$''',
+    '''(?m)^    "H20": 148e12,$''',
+    '''(?m)^    "H200": 989e12,$''',
+    '''(?m)^    "H800": 989e12,$''',
+    '''(?m)^    "L20": 119\.5e12,$''',
+    '''(?m)^    "L20Y": 989e12,$''',
+    '''(?m)^    "L40": 181\.05e12,$''',
+    '''(?m)^    "L40S": 362\.05e12,$''',
+    '''(?m)^    "RTX 3070 Ti": 43\.5e12,$''',
+  ]
+
+  [[rules.allowlists]]
+  condition = "AND"
+  regexTarget = "line"
+  paths = ['''^scripts/models/deepseek-v4-flash\.sh$''']
+  regexes = [
+    '''(?m)^    # 0\.0 is what every upstream H100 recipe uses \(bridge/recipes/deepseek/h100/$''',
+    '''(?m)^    # deepseek_v4\.py:94,174,246,331,401\); only the GB200/GB300 \*pretrain\* recipes$''',
+    '''(?m)^    # entirely at coeff 0\. Every upstream recipe with fusion on \(gb200/gb300 perf\)$''',
+    '''(?m)^    # sets this True; the h100 recipes leave it False only because they also force$''',
+  ]
+
+  [[rules.allowlists]]
+  condition = "AND"
+  regexTarget = "line"
+  paths = ['''^tests/utils/test_flops_counter\.py$''']
+  regexes = [
+    '''(?m)^        \("NVIDIA A100-SXM4-80GB", 312e12\),$''',
+    '''(?m)^        \("NVIDIA A800-SXM4-80GB", 312e12\),$''',
+    '''(?m)^        \("NVIDIA H100 80GB HBM3", 989e12\),$''',
+    '''(?m)^        \("NVIDIA H20", 148e12\),$''',
+    '''(?m)^        \("NVIDIA H800", 989e12\),$''',
+    '''(?m)^        \("NVIDIA L40S", 362\.05e12\),$''',
+    '''(?m)^    common_keys = \["H100", "H800", "A100", "A800", "H20"\]$''',
+    '''(?m)^    gflops = get_device_peak_flops\(unit="G", device_name="NVIDIA H100"\)$''',
+    '''(?m)^    peak_tflops = get_device_peak_flops\(unit="T", device_name="NVIDIA H100 80GB HBM3"\)$''',
+    '''(?m)^    tflops = get_device_peak_flops\(unit="T", device_name="NVIDIA H100"\)$''',
+  ]
+
 # Allowlist: Ignore scanner metadata and generated docs artifacts
 [allowlist]
 description = "Ignore scanner metadata and generated docs artifacts"

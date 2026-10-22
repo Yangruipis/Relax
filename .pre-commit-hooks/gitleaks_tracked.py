@@ -83,10 +83,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     with tempfile.TemporaryDirectory(prefix="gitleaks-tracked-") as tmpdir:
         snapshot_root = Path(tmpdir)
         _copy_tracked_files(repo_root, snapshot_root, tracked_files)
+        # Gitleaks can skip binary, empty and symlink files before path rules.
+        # Scan their names as text while leaving file-content scanning unchanged.
+        with tempfile.NamedTemporaryFile(
+            mode="w", prefix=".gitleaks-tracked-paths-", dir=snapshot_root, encoding="utf-8", delete=False
+        ) as manifest:
+            manifest.writelines(f"{path.as_posix()}\n" for path in tracked_files)
 
+        # Relative scan paths let baseline allowlists identify exact repository paths.
         result = subprocess.run(
-            ["gitleaks", "dir", "--redact", "--verbose", str(snapshot_root)],
-            cwd=repo_root,
+            ["gitleaks", "dir", "--config", str(repo_root / ".gitleaks.toml"), "--redact", "--verbose", "."],
+            cwd=snapshot_root,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
