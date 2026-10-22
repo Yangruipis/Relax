@@ -90,7 +90,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ) as manifest:
             manifest.writelines(f"{path.as_posix()}\n" for path in tracked_files)
 
-        # Relative scan paths let baseline allowlists identify exact repository paths.
+        # Relative scan paths keep native .gitleaksignore fingerprints stable.
         result = subprocess.run(
             ["gitleaks", "dir", "--config", str(repo_root / ".gitleaks.toml"), "--redact", "--verbose", "."],
             cwd=snapshot_root,

@@ -14,7 +14,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 HOOK = ROOT / ".pre-commit-hooks/gitleaks_tracked.py"
-GPU_MODEL = "B" + "300"
+GPU_MODEL = "B300"  # gitleaks:allow -- synthetic test input
 
 
 @pytest.fixture
@@ -23,7 +23,8 @@ def repo(tmp_path: Path) -> Path:
         pytest.skip("Run with the pinned pre-commit gitleaks executable on PATH")
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     shutil.copy2(ROOT / ".gitleaks.toml", tmp_path / ".gitleaks.toml")
-    subprocess.run(["git", "add", ".gitleaks.toml"], cwd=tmp_path, check=True)
+    shutil.copy2(ROOT / ".gitleaksignore", tmp_path / ".gitleaksignore")
+    subprocess.run(["git", "add", ".gitleaks.toml", ".gitleaksignore"], cwd=tmp_path, check=True)
     return tmp_path
 
 
@@ -79,47 +80,70 @@ def test_gitleaks_accepts_profiles_and_non_nvidia_names(repo: Path, content: str
 @pytest.mark.parametrize(
     "name",
     [
-        ".github/ISSUE_TEMPLATE/bug_report.md",
         "docs/draft/distributed_checkpoint_service.md",
         "relax/utils/training/flops_counter.py",
         "relax/utils/external/command_utils.py",
         "scripts/models/deepseek-v4-flash.sh",
         "tests/utils/test_flops_counter.py",
-        ".github/workflows/unittest.yml",
-        ".github/workflows/integration-test.yml",
     ],
 )
-def test_gitleaks_bypasses_existing_lines_after_line_numbers_shift(repo: Path, name: str) -> None:
-    original = subprocess.run(
-        ["git", "show", f"HEAD:{name}"], cwd=ROOT, capture_output=True, text=True, check=True
-    ).stdout
-    _stage(repo, name, "\n" + original)
+def test_gitleaks_allows_annotated_sources_after_line_numbers_shift(repo: Path, name: str) -> None:
+    _stage(repo, name, "\n" + (ROOT / name).read_text())
     result = _scan(repo)
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.mark.parametrize("change", ["append", "modify", "copy", "nested_copy"])
-def test_gitleaks_baseline_does_not_allow_new_records(repo: Path, change: str) -> None:
+@pytest.mark.parametrize("change", ["append", "remove_annotation", "copy_unannotated"])
+def test_gitleaks_still_blocks_unannotated_records(repo: Path, change: str) -> None:
     name = "relax/utils/training/flops_counter.py"
     original = (ROOT / name).read_text()
     old_line = next(line for line in original.splitlines() if f'"{GPU_MODEL}"' in line)
     if change == "append":
         content = original + f"\n# training used {GPU_MODEL}\n"
-    elif change == "modify":
-        content = original.replace(old_line, old_line + "  # measured on our cluster")
-    elif change == "nested_copy":
-        name, content = f"new/{name}", old_line + "\n"
+    elif change == "remove_annotation":
+        content = original.replace(old_line, old_line.replace("gitleaks:allow", ""))
     else:
-        name, content = "new_experiment.py", old_line + "\n"
+        name, content = "new_experiment.py", old_line.split("# gitleaks:allow")[0] + "\n"
     _stage(repo, name, content)
     result = _scan(repo)
     assert result.returncode == 1
     assert "nvidia-gpu-model" in result.stdout + result.stderr
 
 
-def test_gitleaks_gpu_bypass_does_not_disable_existing_secret_rules(repo: Path) -> None:
+@pytest.mark.parametrize(
+    "name",
+    [
+        ".github/ISSUE_TEMPLATE/bug_report.md",
+        ".github/workflows/unittest.yml",
+        ".github/workflows/integration-test.yml",
+    ],
+)
+def test_gitleaks_native_ignore_keeps_existing_github_records(repo: Path, name: str) -> None:
+    original = subprocess.run(
+        ["git", "show", f"HEAD:{name}"], cwd=ROOT, capture_output=True, text=True, check=True
+    ).stdout
+    _stage(repo, name, original)
+    result = _scan(repo)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "comment",
+    ["# gitleaks:allow -- synthetic fixture", "<!-- gitleaks:allow -- public example -->"],
+)
+def test_gitleaks_native_annotation_applies_only_to_its_line(repo: Path, comment: str) -> None:
+    _stage(repo, "fixture.txt", f"{GPU_MODEL} {comment}\n")
+    result = _scan(repo)
+    assert result.returncode == 0, result.stdout + result.stderr
+    _stage(repo, "fixture.txt", f"{GPU_MODEL} {comment}\n{GPU_MODEL}\n")
+    result = _scan(repo)
+    assert result.returncode == 1
+    assert "nvidia-gpu-model" in result.stdout + result.stderr
+
+
+def test_gitleaks_still_detects_secrets_outside_annotated_lines(repo: Path) -> None:
     token = "AKID" + "a" * 20
-    _stage(repo, "new_config.txt", token)
+    _stage(repo, "new_config.txt", f"# {GPU_MODEL} -- gitleaks:allow\n{token}\n")
     result = _scan(repo)
     assert result.returncode == 1
     assert "token-akid" in result.stdout + result.stderr
