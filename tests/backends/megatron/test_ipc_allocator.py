@@ -2,7 +2,10 @@
 """CPU-only state-machine tests, loaded without Megatron/SGLang imports."""
 
 import importlib.util
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -150,3 +153,48 @@ def test_missing_effective_state_fails_explicitly(monkeypatch):
     monkeypatch.setattr(module, "torch", allocator.torch)
     with pytest.raises(RuntimeError, match="Cannot determine"):
         module.IpcBucketAllocator(SimpleNamespace(type="cuda"))
+
+
+@pytest.mark.skipif(
+    module.torch.version.cuda is None or module.torch.version.hip is not None,
+    reason="native allocator parser requires a CUDA-enabled PyTorch build (no GPU needed)",
+)
+@pytest.mark.parametrize("settings", ["", "   ", "max_split_size_mb:128,", "max_split_size_mb:128,   "])
+def test_partial_config_native_parser_restores_exact_state(settings):
+    # Isolate process-global configuration; use the real parser without allocating GPU memory.
+    script = """
+import importlib.util
+import sys
+import torch
+
+spec = importlib.util.spec_from_file_location("tested_ipc_allocator", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+torch.cuda.memory._set_allocator_settings("expandable_segments:True")
+torch.cuda.memory._set_allocator_settings(sys.argv[2])
+before = torch.cuda.memory._snapshot()["allocator_settings"]
+scope = module.IpcBucketAllocator(torch.device("cuda"))
+for fail in (False, True):
+    try:
+        with scope.allocation():
+            during = torch.cuda.memory._snapshot()["allocator_settings"]
+            assert during["expandable_segments"] is False
+            for key, value in before.items():
+                if key not in ("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments"):
+                    assert during[key] == value
+            if fail:
+                raise ValueError("bucket failed")
+    except ValueError:
+        assert fail
+    else:
+        assert not fail
+    assert torch.cuda.memory._snapshot()["allocator_settings"] == before
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(_PATH), settings],
+        env={**os.environ, "PYTORCH_ALLOC_CONF": "backend:native", "PYTORCH_CUDA_ALLOC_CONF": "backend:native"},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

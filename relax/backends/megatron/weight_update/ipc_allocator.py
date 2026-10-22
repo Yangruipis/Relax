@@ -68,11 +68,12 @@ class IpcBucketAllocator:
         if _EXPANDABLE.search(settings):
             self._disabled_settings = _EXPANDABLE.sub("expandable_segments:False", settings)
         else:
-            separator = "," if settings else ""
-            self._disabled_settings = settings + separator + "expandable_segments:False"
+            prefix = settings.rstrip()
+            separator = "," if prefix and not prefix.endswith(",") else ""
+            self._disabled_settings = prefix + separator + "expandable_segments:False"
             # Reapply the effective flag, then restore the exact last string.
             # Parsing a string without this flag preserves its effective value.
-            self._restore_effective_settings = settings + separator + "expandable_segments:True"
+            self._restore_effective_settings = prefix + separator + "expandable_segments:True"
 
     @contextmanager
     def allocation(self) -> Iterator[None]:
