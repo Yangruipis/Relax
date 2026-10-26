@@ -3,6 +3,7 @@
 import dataclasses
 import gc
 import itertools
+import json
 import math
 import os
 import string
@@ -1253,7 +1254,11 @@ def train_one_step(
                 # forward, bypassing _passthrough, so MTP consumes ZERO intercepted
                 # calls. This gate MUST match _chunked_mtp_enabled() in that patch.
                 mtp_enabled = getattr(args, "enable_mtp_training", False)
-                chunked_mtp_on = mtp_enabled and getattr(args, "sft_chunked_logits", False)
+                head_config = get_model_config(model)
+                fused_linear = (
+                    head_config.cross_entropy_loss_fusion and head_config.cross_entropy_fusion_impl == "linear"
+                )
+                chunked_mtp_on = mtp_enabled and getattr(args, "sft_chunked_logits", False) and not fused_linear
                 mtp_output_layer_calls = (
                     0 if chunked_mtp_on else (int(getattr(args, "mtp_num_layers", 0) or 0) if mtp_enabled else 0)
                 )
@@ -1555,6 +1560,8 @@ def train(
                     state["exp_avg"].zero_()
                 if "exp_avg_sq" in state:
                     state["exp_avg_sq"].zero_()
+                if "momentum_buffer" in state:
+                    state["momentum_buffer"].zero_()
 
     if args.manual_gc:
         # Disable the default garbage collector and perform the collection manually.
@@ -1978,6 +1985,23 @@ def _resolve_save_hf_path(save_hf: str, rollout_id: int) -> Path:
     return path
 
 
+def _hf_export_reference(args: Namespace) -> str:
+    """Use unquantized shard keys when exporting a BF16 model from FP8
+    rollout."""
+    reference = args.hf_checkpoint
+    ref_load = getattr(args, "ref_load", None)
+    if getattr(args, "save_hf_dtype", "bf16") == "fp8" or not ref_load:
+        return reference
+    config_path = Path(reference) / "config.json"
+    ref_config_path = Path(ref_load) / "config.json"
+    if config_path.is_file() and ref_config_path.is_file():
+        config = json.loads(config_path.read_text())
+        ref_config = json.loads(ref_config_path.read_text())
+        if config.get("quantization_config") and not ref_config.get("quantization_config"):
+            return ref_load
+    return reference
+
+
 def save_hf_model(args, rollout_id: int, model: Sequence[DDP], *, force_sync: bool = False) -> None:
     """Save Megatron model in HuggingFace format.
 
@@ -1997,7 +2021,13 @@ def save_hf_model(args, rollout_id: int, model: Sequence[DDP], *, force_sync: bo
         if should_log:
             logger.info(f"Saving model in HuggingFace format to {path}")
 
-        bridge = AutoBridge.from_hf_pretrained(args.hf_checkpoint, trust_remote_code=True)
+        export_reference = _hf_export_reference(args)
+        bridge = AutoBridge.from_hf_pretrained(export_reference, trust_remote_code=True)
+        if export_reference != args.hf_checkpoint:
+            # Only shard keys come from ref_load; tokenizer, processor and templates
+            # must retain the actor checkpoint's semantics. Both bridges load lazily.
+            actor_bridge = AutoBridge.from_hf_pretrained(args.hf_checkpoint, trust_remote_code=True)
+            bridge.hf_pretrained.save_artifacts = actor_bridge.hf_pretrained.save_artifacts
 
         path.mkdir(parents=True, exist_ok=True)
 
@@ -2014,9 +2044,9 @@ def save_hf_model(args, rollout_id: int, model: Sequence[DDP], *, force_sync: bo
         )
 
         model_has_mtp = bool(getattr(args, "mtp_num_layers", 0))
-        allow_missing_mtp_keys = reference_expects_mtp(args.hf_checkpoint) and not model_has_mtp
+        allow_missing_mtp_keys = reference_expects_mtp(export_reference) and not model_has_mtp
         # Short-circuits: a reference without vision weights can never be missing them.
-        vision_absent_from_model = reference_expects_vision(args.hf_checkpoint) and not hasattr(
+        vision_absent_from_model = reference_expects_vision(export_reference) and not hasattr(
             get_model_config(model[0]), "vision_config"
         )
 
@@ -2034,7 +2064,7 @@ def save_hf_model(args, rollout_id: int, model: Sequence[DDP], *, force_sync: bo
             # elif: the reference tower is BF16, so under FP8 it would be neither
             # quantized nor listed in modules_to_not_convert, and a loader would
             # decode it as FP8.
-            restore_save_generator = _install_vision_supplement(bridge, args.hf_checkpoint)
+            restore_save_generator = _install_vision_supplement(bridge, export_reference)
             supplementing_vision = restore_save_generator is not None
 
         # Relax only for a group that really will end up absent.
@@ -2065,7 +2095,7 @@ def save_hf_model(args, rollout_id: int, model: Sequence[DDP], *, force_sync: bo
         )
         if (allow_missing_mtp_keys or allow_missing_vision_keys) and is_export_writer and not save_fp8:
             reconcile_hf_export_index(
-                str(path), reference_hf_dir=args.hf_checkpoint, supplement_mtp=allow_missing_mtp_keys
+                str(path), reference_hf_dir=export_reference, supplement_mtp=allow_missing_mtp_keys
             )
 
         if save_fp8 and is_export_writer and fp8_writer is not None:
