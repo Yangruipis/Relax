@@ -838,7 +838,7 @@ role_info = RoleInfo(
     metadata={
         "tp_size": 4,
         "pp_size": 2,
-        "gpu_model": "A100",  # gitleaks:allow -- synthetic metadata example
+        "gpu_model": "A100",
         "memory_gb": 80,
     }
 )

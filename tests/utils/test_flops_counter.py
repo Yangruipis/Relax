@@ -28,11 +28,11 @@ class Config:
     "device_name, expected_raw_flops",
     [
         ("NVIDIA H100 80GB HBM3", 989e12),  # gitleaks:allow
-        ("NVIDIA H800", 989e12),  # gitleaks:allow
-        ("NVIDIA A100-SXM4-80GB", 312e12),  # gitleaks:allow
-        ("NVIDIA A800-SXM4-80GB", 312e12),  # gitleaks:allow
-        ("NVIDIA L40S", 362.05e12),  # gitleaks:allow
-        ("NVIDIA H20", 148e12),  # gitleaks:allow
+        ("NVIDIA H800", 989e12),
+        ("NVIDIA A100-SXM4-80GB", 312e12),
+        ("NVIDIA A800-SXM4-80GB", 312e12),
+        ("NVIDIA L40S", 362.05e12),
+        ("NVIDIA H20", 148e12),
         ("Ascend910B3", 354e12),
     ],
 )

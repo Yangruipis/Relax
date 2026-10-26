@@ -1,9 +1,8 @@
 #!/bin/bash
 
 # Copyright (c) 2026 Relax Authors. All Rights Reserved.
-# GPU profile: 80G Hopper per GPU.
 #
-# DeepSeek-V4-Flash-0731 MXFP4 QAT on OpenMathReasoning-mini, 128 GPUs (80G Hopper each).
+# DeepSeek-V4-Flash-0731 MXFP4 QAT on OpenMathReasoning-mini, 128 H800 GPUs.
 # Routed experts: FP32 master -> MXFP4 effective weights -> BF16 GEMM by default.
 # In native mode, other TE projections use FP8 with power-of-two weight scales.
 # Indexer QAT is off by default; full optimizer state is required for exact resume.

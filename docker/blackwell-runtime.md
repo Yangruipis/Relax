@@ -11,9 +11,6 @@ binaries. A complete Docker build, 280G Blackwell numerical gates, and multi-nod
 save/resume remain required. CPU tests and successful patch application are not
 GPU validation.
 
-The source alignment targets, fetched on 2026-10-20, are
-`feat/minhao/qwen35-b300-optimized-delivery@3fb0859060e51700cba8d30f8d00dac4b9989cbd` <!-- gitleaks:allow historical source identifier -->
-and `feat/qwen38-final@85f95e0d42d385f9ff1257907486e87d246c6f1f`.
 The installer is a reference delivery, not a build input: Docker builds fetch
 pinned upstream sources and apply the checked-in patches. No `install.sh`,
 `activate.sh`, archived site-packages or precompiled 280G Blackwell wheel is required.
