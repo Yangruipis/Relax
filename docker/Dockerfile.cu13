@@ -312,7 +312,8 @@ COPY docker/patch/${PATCH_VERSION}/megatron.patch \
     docker/patch/megatron/sync-save-bounded-staging.patch \
     docker/patch/megatron/20261016-qwen38-models.patch \
     docker/patch/megatron/20261020-qwen35-optimized.patch \
-    docker/patch/megatron/20261020-model-operators.patch /root/Megatron-LM/
+    docker/patch/megatron/20261020-model-operators.patch \
+    docker/patch/megatron/mtp-cp-normalization.patch /root/Megatron-LM/
 RUN cd Megatron-LM && \
     sha256sum megatron.patch > /etc/relax-megatron-patch.sha256 && \
     patch --batch --forward --fuzz=0 -p1 < /root/Megatron-LM/megatron.patch && \
@@ -325,10 +326,11 @@ RUN cd Megatron-LM && \
     sha256sum 20261016-qwen38-models.patch > /etc/relax-qwen38-model-patch.sha256 && \
     patch --batch --forward --fuzz=0 -p1 < 20261020-qwen35-optimized.patch && \
     patch --batch --forward --fuzz=0 -p1 < 20261020-model-operators.patch && \
+    patch --batch --forward --fuzz=0 -p1 < mtp-cp-normalization.patch && \
     sha256sum 20261020-model-operators.patch > /etc/relax-model-operators-patch.sha256 && \
     sha256sum 20261020-qwen35-optimized.patch > /etc/relax-qwen35-model-patch.sha256 && \
     python -m compileall -q megatron && \
-    rm megatron.patch sync-save-bounded-staging.patch 20261016-qwen38-models.patch && \
+    rm megatron.patch sync-save-bounded-staging.patch 20261016-qwen38-models.patch mtp-cp-normalization.patch && \
     apt-get update && apt-get install -y --no-install-recommends jq && \
     rm -rf /var/lib/apt/lists/*
 
