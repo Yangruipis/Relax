@@ -85,3 +85,11 @@ def test_post_process_env_preserves_jsonl_index_settings(monkeypatch):
     configured = {"RELAX_JSONL_INDEX_WORKERS": "4"}
     runtime_env = post_process_env(_make_args(), {"env_vars": configured.copy()})
     assert all(runtime_env["env_vars"][key] == value for key, value in configured.items())
+
+
+def test_post_process_env_propagates_microbatch_objective(monkeypatch):
+    monkeypatch.setenv("RELAX_MICROBATCH_BALANCE", "flops")
+    monkeypatch.setattr("relax.utils.utils._resolve_to_ip", lambda _addr: "127.0.0.1")
+    assert post_process_env(_make_args(), {})["env_vars"]["RELAX_MICROBATCH_BALANCE"] == "flops"
+    env = {"env_vars": {"RELAX_MICROBATCH_BALANCE": "tokens"}}
+    assert post_process_env(_make_args(), env)["env_vars"]["RELAX_MICROBATCH_BALANCE"] == "tokens"
