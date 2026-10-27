@@ -471,9 +471,6 @@ def post_process_env(args, env):
         if name not in env["env_vars"] and (value := os.environ.get(name)) is not None:
             env["env_vars"][name] = value
 
-    # Keep the driver and training workers on the same microbatch objective.
-    env["env_vars"].setdefault("RELAX_MICROBATCH_BALANCE", Envs.RELAX_MICROBATCH_BALANCE)
-
     # Generic env-var passthrough for overlay packages. Comma-separated list
     # of env-var names the driver wants forwarded to every Ray actor. Each
     # name is copied from the driver's os.environ; missing names are

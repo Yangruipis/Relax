@@ -8,14 +8,14 @@ Relax 训练吞吐量最大化实践指南。本文提到的所有参数均可�
 
 Megatron 后端可用每条样本的估算 FLOPs 平衡动态微批。相同 token 数的文本、图像和视频样本可能有不同计算成本；该模式在每个 DP rank 已取得的样本内调整微批划分，不负责跨 DP rank 重新分发样本。
 
-默认 `RELAX_MICROBATCH_BALANCE=tokens`，保持原有行为。启用 FLOPs 平衡需要 `--use-dynamic-batch-size` 和默认的 `balanced` packing。例如，在准备好模型、数据和保存目录后，运行已有的同步 Qwen3.5 SFT 脚本：
+默认 `--microbatch-balance tokens`，保持原有行为。启用 FLOPs 平衡时，在训练脚本的参数数组中添加：
 
 ```bash
-RELAX_MICROBATCH_BALANCE=flops \
-  bash scripts/entrypoint/ray-job.sh scripts/training/sft/run-qwen3.5-9B-math-8xgpu.sh
+--use-dynamic-batch-size \
+--microbatch-balance flops
 ```
 
-该设置由 driver 传入 Ray worker；显式配置在 runtime environment 中的值优先。对照实验只需改回 `tokens`，并使用独立保存目录，保持模型、数据、seed、token 预算和其他参数相同。
+packing 使用默认的 `balanced`。该选项通过训练 `args` 传入各 worker，无需设置环境变量。切回 `--microbatch-balance tokens` 即恢复 token 平衡。A/B 实验使用独立保存目录，保持模型、数据、seed、token 预算和其他参数相同。
 
 微批数仍由 token 容量确定，再按现有 DP/VPP 规则对齐。FLOPs 只改变固定微批数内的平衡目标；硬容量继续使用训练路径的物理长度，包括 unsplit THD 的 TP/CP padding。若 FLOPs 候选超出容量，回退原有 token 平衡及 first-fit 保护。单条不可拆分的超长样本仍单独成批，开关不会使它自动满足显存预算。样本身份、optimizer-step 边界和原有 loss 归一化不变。
 

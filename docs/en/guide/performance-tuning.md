@@ -8,14 +8,14 @@ A practical guide to maximizing training throughput in Relax. All parameters men
 
 The Megatron backend can balance dynamic microbatches by estimated per-sample FLOPs. Text, images and videos with similar token counts can require different amounts of computation. This mode repartitions samples already assigned to each DP rank; it does not redistribute samples between DP ranks.
 
-The default, `RELAX_MICROBATCH_BALANCE=tokens`, preserves existing behavior. FLOPs balancing requires `--use-dynamic-batch-size` and the default `balanced` packing strategy. After preparing the model, data and save directories, an existing synchronous Qwen3.5 SFT recipe can be launched with:
+The default, `--microbatch-balance tokens`, preserves existing behavior. To enable FLOPs balancing, add these options to the argument array in your training script:
 
 ```bash
-RELAX_MICROBATCH_BALANCE=flops \
-  bash scripts/entrypoint/ray-job.sh scripts/training/sft/run-qwen3.5-9B-math-8xgpu.sh
+--use-dynamic-batch-size \
+--microbatch-balance flops
 ```
 
-The driver forwards this setting to Ray workers; an explicit value in the runtime environment takes precedence. For an A/B comparison, switch to `tokens` and use a separate save directory, keeping the model, data, seed, token budget and other settings identical.
+Use the default `balanced` packing strategy. The option travels to workers in the training `args`; no environment variable is needed. Switch back to `--microbatch-balance tokens` for token balancing. Use separate save directories for A/B comparisons, keeping the model, data, seed, token budget and other settings identical.
 
 Token capacity still determines the microbatch count, followed by the existing DP/VPP alignment. FLOPs changes only the objective within that count. Capacity checks retain physical training lengths, including TP/CP document padding for unsplit THD inputs. Candidates that exceed capacity fall back to the existing token balancing and first-fit protection. An indivisible oversized sample remains isolated; enabling this mode does not make that sample fit in memory. Sample identity, optimizer-step boundaries and existing loss normalization are preserved.
 

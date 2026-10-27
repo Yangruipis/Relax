@@ -18,8 +18,6 @@ pytestmark = pytest.mark.skipif(importlib.util.find_spec("megatron") is None, re
 
 
 def _worker(rank, rendezvous, output):
-    import os
-
     from megatron.core import parallel_state as mpu
 
     from relax.backends.megatron import data
@@ -27,7 +25,6 @@ def _worker(rank, rendezvous, output):
     from relax.utils.training.microbatch_cost import register_sample_cost_estimator
 
     torch.set_num_threads(1)
-    os.environ["RELAX_MICROBATCH_BALANCE"] = "flops"
     dist.init_process_group("gloo", init_method=rendezvous, rank=rank, world_size=4, timeout=timedelta(seconds=45))
     try:
         mpu.initialize_model_parallel(tensor_model_parallel_size=2)
@@ -35,6 +32,7 @@ def _worker(rank, rendezvous, output):
         misc.get_hf_config = lambda _: SimpleNamespace(model_type="distributed_cost_test")
         register_sample_cost_estimator("distributed_cost_test", lambda config, batch, args: batch["test_costs"])
         args = SimpleNamespace(
+            microbatch_balance="flops",
             global_batch_size=8,
             use_dynamic_batch_size=True,
             max_tokens_per_gpu=16,

@@ -7,8 +7,6 @@ from argparse import Namespace
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from relax.utils.env import Envs
-
 
 SampleCostEstimator = Callable[[Any, dict[str, Any], Namespace], Sequence[float]]
 _ESTIMATORS: dict[str, SampleCostEstimator] = {}
@@ -30,18 +28,20 @@ def register_sample_cost_estimator(model_type: str, estimator: SampleCostEstimat
 
 def validate_microbatch_balance(args: Namespace) -> bool:
     """Reject modes that bypass the supported dynamic partitioner."""
-    mode = Envs.RELAX_MICROBATCH_BALANCE
+    mode = getattr(args, "microbatch_balance", "tokens")
     if mode not in ("tokens", "flops"):
-        raise ValueError("RELAX_MICROBATCH_BALANCE must be tokens or flops")
+        raise ValueError("--microbatch-balance must be tokens or flops")
     if mode == "tokens":
         return False
+    if getattr(args, "train_backend", "megatron") != "megatron":
+        raise ValueError("--microbatch-balance flops requires --train-backend megatron")
     if not getattr(args, "use_dynamic_batch_size", False):
         raise ValueError("FLOPs balancing requires --use-dynamic-batch-size")
     if getattr(args, "sft_packing_strategy", "balanced") != "balanced":
         raise ValueError("FLOPs balancing requires balanced packing, not binpack")
     if getattr(args, "sft_wholepack", False):
         raise ValueError("FLOPs balancing does not support wholepack")
-    if getattr(args, "fully_async", False):
+    if getattr(args, "fully_async", False) or getattr(args, "hybrid", False):
         raise ValueError("FLOPs balancing does not support fully-async streaming/drain scheduling")
     if getattr(args, "loss_type", None) in ("dpo", "rm"):
         raise ValueError("FLOPs balancing does not support preference pairs")
@@ -67,7 +67,7 @@ def sample_costs(args: Namespace, rollout_data: dict[str, Any]) -> list[float] |
     if estimator is None:
         raise ValueError(
             f"No FLOPs sample cost estimator for model_type={model_type!r}; "
-            "register_sample_cost_estimator or use RELAX_MICROBATCH_BALANCE=tokens"
+            "register_sample_cost_estimator or use --microbatch-balance tokens"
         )
     costs = [float(value) for value in estimator(config, rollout_data, args)]
     if len(costs) != len(rollout_data["total_lengths"]):

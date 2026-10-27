@@ -124,7 +124,7 @@ def test_unsupported_or_incomplete_cost_inputs_fail_explicitly(failure):
 
 
 @pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"])
-def test_real_hf_config_dispatch_for_each_family(model_type, tmp_path, monkeypatch):
+def test_real_hf_config_dispatch_for_each_family(model_type, tmp_path):
     import transformers
 
     cls = getattr(
@@ -138,8 +138,7 @@ def test_real_hf_config_dispatch_for_each_family(model_type, tmp_path, monkeypat
     )
     config = cls()
     config.save_pretrained(tmp_path)
-    monkeypatch.setenv("RELAX_MICROBATCH_BALANCE", "flops")
-    args = Namespace(use_dynamic_batch_size=True, hf_checkpoint=str(tmp_path))
+    args = Namespace(microbatch_balance="flops", use_dynamic_batch_size=True, hf_checkpoint=str(tmp_path))
     costs = microbatch_cost.sample_costs(args, {"total_lengths": [64, 128]})
     assert 0 < costs[0] < costs[1]
 
@@ -151,9 +150,8 @@ def test_custom_estimator_registration_and_default_no_config_load(monkeypatch):
     monkeypatch.setattr(misc, "get_hf_config", lambda _: SimpleNamespace(model_type="test_family"))
     args = Namespace(use_dynamic_batch_size=True, hf_checkpoint="not-a-real-model")
     batch = {"total_lengths": [2, 3]}
-    monkeypatch.setenv("RELAX_MICROBATCH_BALANCE", "tokens")
     assert microbatch_cost.sample_costs(args, batch) is None
-    monkeypatch.setenv("RELAX_MICROBATCH_BALANCE", "flops")
+    args.microbatch_balance = "flops"
     with pytest.raises(ValueError, match="register_sample_cost_estimator"):
         microbatch_cost.sample_costs(args, batch)
     microbatch_cost.register_sample_cost_estimator("test_family", lambda config, data, options: [4, 9])
@@ -166,12 +164,12 @@ def test_custom_estimator_registration_and_default_no_config_load(monkeypatch):
 def test_estimator_output_validation(values, monkeypatch):
     from relax.utils import misc
 
-    monkeypatch.setenv("RELAX_MICROBATCH_BALANCE", "flops")
     monkeypatch.setattr(microbatch_cost, "_ESTIMATORS", {"test_family": lambda *a: values})
     monkeypatch.setattr(misc, "get_hf_config", lambda _: SimpleNamespace(model_type="test_family"))
     with pytest.raises(ValueError):
         microbatch_cost.sample_costs(
-            Namespace(use_dynamic_batch_size=True, hf_checkpoint="unused"), {"total_lengths": [2, 3]}
+            Namespace(microbatch_balance="flops", use_dynamic_batch_size=True, hf_checkpoint="unused"),
+            {"total_lengths": [2, 3]},
         )
 
 
@@ -182,11 +180,14 @@ def test_estimator_output_validation(values, monkeypatch):
         {"sft_packing_strategy": "binpack"},
         {"sft_wholepack": True},
         {"fully_async": True},
+        {"hybrid": True},
         {"loss_type": "dpo"},
         {"loss_type": "rm"},
+        {"train_backend": "fsdp"},
     ],
 )
-def test_bypassed_schedulers_reject_flops(overrides, monkeypatch):
-    monkeypatch.setenv("RELAX_MICROBATCH_BALANCE", "flops")
+def test_bypassed_schedulers_reject_flops(overrides):
     with pytest.raises(ValueError):
-        microbatch_cost.validate_microbatch_balance(Namespace(**{"use_dynamic_batch_size": True, **overrides}))
+        microbatch_cost.validate_microbatch_balance(
+            Namespace(**{"microbatch_balance": "flops", "use_dynamic_batch_size": True, **overrides})
+        )

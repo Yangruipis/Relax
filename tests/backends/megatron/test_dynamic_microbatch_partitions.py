@@ -225,7 +225,7 @@ def test_flops_capacity_fallback_and_cheapest_dummy(partitioner):
     assert groups[2] == [0]  # Less compute even though this sample has more tokens.
 
 
-def test_iterator_slices_costs_at_each_optimizer_step(partitioner, monkeypatch):
+def test_iterator_slices_costs_at_each_optimizer_step(partitioner):
     from types import SimpleNamespace
 
     import numpy as np
@@ -266,8 +266,9 @@ def test_iterator_slices_costs_at_each_optimizer_step(partitioner, monkeypatch):
         ),
         namespace,
     )
-    monkeypatch.setenv("RELAX_MICROBATCH_BALANCE", "flops")
-    args = SimpleNamespace(global_batch_size=6, use_dynamic_batch_size=True, max_tokens_per_gpu=16)
+    args = SimpleNamespace(
+        microbatch_balance="flops", global_batch_size=6, use_dynamic_batch_size=True, max_tokens_per_gpu=16
+    )
     rollout = {"total_lengths": [8] * 12}
     iterators, counts = namespace["get_data_iterator"](args, [], rollout)
     first, _ = partitioner([8] * 6, 3, 16, costs=costs[:6])
