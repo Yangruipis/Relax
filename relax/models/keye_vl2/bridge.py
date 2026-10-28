@@ -37,7 +37,6 @@ class KeyeBridge(Qwen3MoEBridge):
             "output_layer.weight": "lm_head.weight",
             "decoder.final_layernorm.weight": "model.norm.weight",
             "decoder.layers.*.input_layernorm.weight": "model.layers.*.input_layernorm.weight",
-            "decoder.layers.*.mlp.router.weight": "model.layers.*.mlp.gate.weight",
             "decoder.layers.*.pre_mlp_layernorm.weight": "model.layers.*.post_attention_layernorm.weight",
             "decoder.layers.*.self_attention.q_layernorm.weight": "model.layers.*.self_attn.q_norm.weight",
             "decoder.layers.*.self_attention.k_layernorm.weight": "model.layers.*.self_attn.k_norm.weight",
@@ -45,6 +44,9 @@ class KeyeBridge(Qwen3MoEBridge):
         }
         prefix = "language_model." if getattr(self, "_multimodal", False) else ""
         mappings = [AutoMapping(prefix + k, v) for k, v in names.items()]
+        mappings.append(
+            ReplicatedMapping(prefix + "decoder.layers.*.mlp.router.weight", "model.layers.*.mlp.gate.weight")
+        )
         for suffix in ("q_proj.weight", "k_proj.weight", "q_norm.weight", "k_norm.weight", "k_norm.bias"):
             mappings.append(
                 ReplicatedMapping(

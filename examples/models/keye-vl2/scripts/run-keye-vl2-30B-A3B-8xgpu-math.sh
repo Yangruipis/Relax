@@ -63,14 +63,15 @@ ROLLOUT_ARGS=(
     --rm-type dapo
     --reward-key score
     --num-rollout "${NUM_ROLLOUT:-200}"
-    --rollout-batch-size "${ROLLOUT_BATCH_SIZE:-8}"
+    --rollout-batch-size "${ROLLOUT_BATCH_SIZE:-32}"
     --n-samples-per-prompt "${N_SAMPLES:-8}"
-    --global-batch-size "$(( ${ROLLOUT_BATCH_SIZE:-8} * ${N_SAMPLES:-8} ))"
+    --global-batch-size "$(( ${ROLLOUT_BATCH_SIZE:-32} * ${N_SAMPLES:-8} ))"
     --rollout-max-response-len "${RESPONSE_LEN:-8192}"
     --rollout-max-prompt-len 4096
     --rollout-max-context-len 16384
     --rollout-temperature 1
     --balance-data
+    --dynamic-sampling-filter-path relax.engine.filters.dynamic_sampling_filters.check_reward_nonzero_std
 )
 EVAL_ARGS=(
     --skip-eval-before-train
@@ -82,6 +83,7 @@ EVAL_ARGS=(
     --eval-top-p 0.7
 )
 PERF_ARGS=(
+    --no-rope-fusion
     --tensor-model-parallel-size 1
     --pipeline-model-parallel-size 1
     --context-parallel-size 1
@@ -92,7 +94,7 @@ PERF_ARGS=(
     --recompute-num-layers 1
     --micro-batch-size 1
     --use-dynamic-batch-size
-    --max-tokens-per-gpu "${MAX_TOKENS_PER_GPU:-16384}"
+    --max-tokens-per-gpu "${MAX_TOKENS_PER_GPU:-32768}"
     --log-probs-max-tokens-per-gpu "${LOGPROBS_MAX_TOKENS:-32768}"
     --calculate-per-token-loss
     --moe-token-dispatcher-type alltoall
@@ -121,7 +123,7 @@ OPTIMIZER_ARGS=(
 SGLANG_ARGS=(
     --sglang-external-model-package relax.models.keye_vl2.sglang
     --sglang-json-model-override-args '{"language_model_only":true}'
-    # Four TP2 engines avoid TP8's replicated KV heads and small MoE shards.
+    # Four TP2 engines share each model replica across two GPUs.
     --rollout-num-gpus-per-engine "${SGLANG_TP:-2}"
     --sglang-mem-fraction-static 0.65
     --sglang-attention-backend triton

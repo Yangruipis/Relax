@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Relax Authors. All Rights Reserved.
 
-"""Graph-safe Keye RoPE and BF16 paged indexer; reuse SGLang's GQA decode."""
+"""Graph-safe Keye operators with matching training and rollout arithmetic."""
 
 from functools import lru_cache
 
@@ -119,20 +119,6 @@ def paged_scores(
     return scores
 
 
-@triton.jit
-def _selected_slots(
-    SELECTED, TABLE, REQUESTS, LENGTHS, INDPTR, INDICES, TOPK: tl.constexpr, TS: tl.constexpr, BLOCK: tl.constexpr
-):
-    row = tl.program_id(0)
-    n = tl.arange(0, BLOCK)
-    count = tl.minimum(tl.load(LENGTHS + row), TOPK)
-    request = tl.load(REQUESTS + row)
-    index = tl.load(SELECTED + row * TOPK + n, mask=n < count, other=0)
-    slot = tl.load(TABLE + request * TS + index, mask=n < count, other=0)
-    offset = tl.load(INDPTR + row)
-    tl.store(INDICES + offset + n, slot, mask=n < count)
-
-
 def paged_decode(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -145,25 +131,112 @@ def paged_decode(
     lengths: torch.Tensor,
     width: int,
 ) -> torch.Tensor:
-    from sglang.kernels.ops.attention.decode_attention import decode_attention_fwd
+    """Keep KV paged while using the same sparse forward as training."""
+    from relax.models.keye_vl2.sparse_attention import compact_indices, sparse_attention
 
     scores = paged_scores(index_query, index_cache, weights, table, requests, lengths, width)
-    topk = min(2048, width)
-    # Sorted scores keep valid selections before the -inf padding for short
-    # requests. CSR stores only those valid slots; no padded KV is ever read.
-    selected = scores.topk(topk, dim=-1).indices
-    counts = lengths.clamp(max=topk)
-    indptr = torch.cat((torch.zeros(1, device=query.device, dtype=torch.int32), counts.cumsum(0).int()))
-    indices = torch.empty(query.shape[0] * topk, device=query.device, dtype=torch.int32)
-    _selected_slots[(query.shape[0],)](
-        selected, table, requests, lengths, indptr, indices, topk, table.stride(0), triton.next_power_of_2(topk)
+    selected = scores.topk(min(2048, width), dim=-1).indices
+    ordered, counts = compact_indices(selected, selected < lengths[:, None])
+    slots = table[requests.long()[:, None], ordered.long()].int().contiguous()
+    return sparse_attention(query, key, value, slots, counts).flatten(1)
+
+
+@triton.jit
+def _merge_experts(X, ORDER, Y, H: tl.constexpr, K: tl.constexpr, BLOCK: tl.constexpr):
+    token = tl.program_id(0)
+    h = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    total = tl.full((BLOCK,), 0, tl.float32)
+    for slot in range(K):
+        expert = tl.load(ORDER + token * K + slot)
+        value = tl.load(X + (token * K + expert) * H + h, mask=h < H, other=0).to(tl.float32)
+        total = total + value
+    tl.store(Y + token * H + h, total, mask=h < H)
+
+
+def merge_experts(routed: torch.Tensor, expert_ids: torch.Tensor) -> torch.Tensor:
+    """Match TE unpermute: descending expert order, sequential FP32 adds."""
+    tokens, topk, hidden = routed.shape
+    order = expert_ids.argsort(1, descending=True)
+    output = torch.empty((tokens, hidden), device=routed.device, dtype=routed.dtype)
+    _merge_experts[(tokens, triton.cdiv(hidden, 256))](routed, order, output, hidden, topk, 256)
+    return output
+
+
+def expert_forward(
+    hidden: torch.Tensor,
+    gate_up: torch.Tensor,
+    down: torch.Tensor,
+    probabilities: torch.Tensor,
+    expert_ids: torch.Tensor,
+) -> torch.Tensor:
+    """Match Megatron's unfused BF16 SwiGLU and pre-down routing weights."""
+    from sglang.kernels.ops.moe.fused_moe_triton_kernels import invoke_fused_moe_kernel
+    from sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe import _prepare_fused_moe_run
+
+    if hidden.shape[0] == 0:
+        return hidden
+    config, down_config, _, _, sorted_ids, block_experts, padded_count = _prepare_fused_moe_run(
+        hidden,
+        gate_up,
+        down,
+        expert_ids,
+        use_fp8_w8a8=False,
+        use_int8_w8a8=False,
+        use_int8_w8a16=False,
+        use_int4_w4a16=False,
+        per_channel_quant=False,
+        block_shape=None,
     )
-    output = torch.empty_like(query)
-    splits = 4
-    partial = torch.empty((*query.shape[:2], splits, value.shape[-1]), device=query.device, dtype=torch.float32)
-    lse = torch.empty((*query.shape[:2], splits), device=query.device, dtype=torch.float32)
-    num_splits = torch.full((query.shape[0],), splits, device=query.device, dtype=torch.int32)
-    decode_attention_fwd(
-        query, key, value, output, indptr, indices, partial, lse, num_splits, splits, query.shape[-1] ** -0.5, 1.0, 1.0
+    tokens, topk = expert_ids.shape
+    projected = torch.empty((tokens * topk, gate_up.shape[1]), device=hidden.device, dtype=hidden.dtype)
+    options = dict(
+        compute_type=tl.bfloat16,
+        use_fp8_w8a8=False,
+        use_int8_w8a8=False,
+        use_int8_w8a16=False,
+        use_int4_w4a16=False,
+        per_channel_quant=False,
+        filter_expert=True,
     )
-    return output.flatten(1)
+    invoke_fused_moe_kernel(
+        hidden,
+        gate_up,
+        None,
+        projected,
+        None,
+        None,
+        None,
+        probabilities,
+        expert_ids,
+        sorted_ids,
+        block_experts,
+        padded_count,
+        False,
+        topk,
+        config,
+        **options,
+    )
+    gate, up = projected.chunk(2, -1)
+    # Each BF16 boundary matters: SiLU -> multiply up -> multiply FP32 route
+    # probability -> BF16, all before the down GEMM, as in TEGroupedMLP.
+    activated = (torch.nn.functional.silu(gate) * up * probabilities.reshape(-1, 1)).to(hidden.dtype)
+    routed = torch.empty((tokens, topk, down.shape[1]), device=hidden.device, dtype=hidden.dtype)
+    invoke_fused_moe_kernel(
+        activated,
+        down,
+        None,
+        routed,
+        None,
+        None,
+        None,
+        probabilities,
+        expert_ids,
+        sorted_ids,
+        block_experts,
+        padded_count,
+        False,
+        1,
+        down_config or config,
+        **options,
+    )
+    return merge_experts(routed, expert_ids)

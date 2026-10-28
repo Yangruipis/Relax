@@ -12,6 +12,10 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 from sglang.srt.constants import GPU_MEMORY_TYPE_KV_CACHE
+from sglang.srt.layers.layernorm import RMSNorm
+from sglang.srt.layers.linear import ReplicatedLinear
+from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
+from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
 from sglang.srt.managers.mm_utils import MultiModalityDataPaddingPatternMultimodalTokens, general_mm_embed_routine
 from sglang.srt.mem_cache.memory_pool import KVWriteLoc
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
@@ -21,9 +25,30 @@ from sglang.srt.models.qwen3_moe import Qwen3MoeAttention, Qwen3MoeForCausalLM, 
 from sglang.srt.runtime_context import get_mm, get_model
 
 from relax.models.keye_vl2.indexer import KeyeIndexer, indexer_scores
+from relax.models.keye_vl2.norm import RMSNorm as StableRMSNorm
+from relax.models.keye_vl2.sparse_attention import compact_indices, sparse_attention
 from relax.models.keye_vl2.vision import build_vision, image_features
 
-from .ops import paged_decode, rope
+from .ops import expert_forward, paged_decode, rope
+
+
+def padded_linear(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+    rows = x.numel() // x.shape[-1]
+    if 0 < rows < 64:
+        padded = F.pad(x.reshape(rows, x.shape[-1]), (0, 0, 0, 64 - rows))
+        output = F.linear(padded, weight, bias)[:rows]
+        return output.reshape(*x.shape[:-1], output.shape[-1])
+    return F.linear(x, weight, bias)
+
+
+class KeyeLinear(torch.nn.Linear):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return padded_linear(x, self.weight, self.bias)
+
+
+class KeyeLinearMethod(UnquantizedLinearMethod):
+    def apply(self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+        return padded_linear(x, layer.weight, bias)
 
 
 def decode_attention(
@@ -94,8 +119,8 @@ class KeyeAttention(Qwen3MoeAttention):
         lengths = forward_batch.seq_lens_cpu
         if forward_batch.forward_mode.is_decode():
             # A fixed index-score capacity is safe for CUDA graph replay;
-            # GPU lengths gate actual cache reads. Main K/V stay paged and
-            # SGLang's GQA kernel reads only the selected <=2048 slots.
+            # GPU lengths gate actual cache reads. The shared GQA forward
+            # reads only the selected <=2048 slots.
             output = paged_decode(
                 q,
                 pool.get_key_buffer(layer_id),
@@ -118,31 +143,71 @@ class KeyeAttention(Qwen3MoeAttention):
         for batch_index, (length, query_length) in enumerate(zip(lengths, query_lengths)):
             length = int(length)  # CPU metadata, never a GPU synchronization.
             slots = req_to_token[batch_index, :length].long()
-            all_k = (
-                pool.get_key_buffer(layer_id)[slots]
-                .repeat_interleave(self.num_heads // self.num_kv_heads, 1)
-                .transpose(0, 1)
-            )
-            all_v = (
-                pool.get_value_buffer(layer_id)[slots]
-                .repeat_interleave(self.num_heads // self.num_kv_heads, 1)
-                .transpose(0, 1)
-            )
+            all_k = pool.get_key_buffer(layer_id)[slots]
+            all_v = pool.get_value_buffer(layer_id)[slots]
             keys = cache[slots].unsqueeze(1)
             for start in range(offset, offset + query_length, 128):
                 end = min(start + 128, offset + query_length)
                 scores = indexer_scores(iq[start:end], keys, iw[start:end])
                 causal = torch.arange(length, device=q.device)[None, :] <= positions[start:end, None]
                 scores.masked_fill_(~causal, torch.finfo(scores.dtype).min)
-                support = torch.zeros_like(causal).scatter_(1, scores.topk(min(2048, length), -1).indices, True)
-                support &= causal
-                result = F.scaled_dot_product_attention(
-                    q[start:end].transpose(0, 1)[None], all_k[None], all_v[None], attn_mask=support[None, None]
-                )[0]
-                outputs.append(result.transpose(0, 1).reshape(end - start, -1))
+                selected = scores.topk(min(2048, length), -1).indices
+                selected_slots, counts = compact_indices(selected, causal.gather(1, selected))
+                result = sparse_attention(q[start:end], all_k, all_v, selected_slots, counts)
+                outputs.append(result.reshape(end - start, -1))
             offset += query_length
         output, _ = self.o_proj(torch.cat(outputs, 0))
         return output
+
+
+class KeyeExperts(FusedMoE):
+    def forward(self, hidden_states: torch.Tensor, topk_output: Any, pre_quant_input: Any = None) -> torch.Tensor:
+        if self.num_local_experts != self.num_experts:
+            raise ValueError("Keye rollout currently requires tensor-parallel experts")
+        return expert_forward(
+            hidden_states, self.w13_weight, self.w2_weight, topk_output.topk_weights, topk_output.topk_ids
+        )
+
+
+class KeyeRMSNorm(StableRMSNorm):
+    @staticmethod
+    def convert(norm: RMSNorm) -> None:
+        # Keep the module object: SGLang's layer communicator retains it.
+        weight, eps = norm.weight, norm.variance_epsilon
+        norm.__class__ = KeyeRMSNorm
+        StableRMSNorm.__init__(
+            norm, normalized_shape=weight.numel(), eps=eps, dtype=weight.dtype, device=weight.device
+        )
+        norm.weight = weight
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor | None = None,
+        post_residual_addition: torch.Tensor | None = None,
+        quant_linear: torch.nn.Module | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if residual is None:
+            return super().forward(x)
+        if post_residual_addition is not None:
+            residual = residual + post_residual_addition
+        # Megatron rounds the residual add before computing norm statistics.
+        # SGLang's fused add/norm instead uses the unrounded FP32 sum.
+        residual = x + residual
+        return super().forward(residual), residual
+
+
+class KeyeRouter(ReplicatedLinear):
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, None]:
+        # Match Megatron's shape-independent dot, with FP32 routing scores.
+        return F.linear(x.double(), self.weight.double()).float(), None
+
+
+def keye_routing(
+    hidden_states: torch.Tensor, gating_output: torch.Tensor, topk: int, renormalize: bool
+) -> tuple[torch.Tensor, torch.Tensor]:
+    scores, indices = torch.topk(gating_output, k=topk, dim=1, sorted=True)
+    return torch.softmax(scores, dim=-1, dtype=torch.float32), indices.int()
 
 
 class KeyeLanguageModel(Qwen3MoeModel):
@@ -154,16 +219,30 @@ class KeyeVL2MoeForConditionalGeneration(Qwen3MoeForCausalLM):
     def __init__(self, config: Any, quant_config: Any = None, prefix: str = "") -> None:
         if quant_config is not None:
             raise ValueError("Keye reference rollout requires BF16 weights")
+        torch.backends.cuda.preferred_blas_library("cublaslt")
         super().__init__(config, quant_config, prefix)
+        self.lm_head.quant_method = KeyeLinearMethod()
         self.model.__class__ = KeyeLanguageModel
         self.multimodal_enabled = get_mm().enable_multimodal
         if self.multimodal_enabled:
             self.visual, self.mlp_AR = build_vision(config, get_model().model_path)
+        KeyeRMSNorm.convert(self.model.norm)
         for layer in self.model.layers:
+            KeyeRMSNorm.convert(layer.input_layernorm)
+            KeyeRMSNorm.convert(layer.post_attention_layernorm)
+            layer.mlp.gate.__class__ = KeyeRouter
+            layer.mlp.experts.__class__ = KeyeExperts
+            layer.mlp.topk.topk_config.custom_routing_function = keye_routing
             attention = layer.self_attn
+            KeyeRMSNorm.convert(attention.q_norm)
+            KeyeRMSNorm.convert(attention.k_norm)
             attention.__class__ = KeyeAttention
+            attention.qkv_proj.quant_method = KeyeLinearMethod()
+            attention.o_proj.quant_method = KeyeLinearMethod()
             attention.keye_multimodal_enabled = bool(self.multimodal_enabled)
             attention.sa_indexer = KeyeIndexer(config.hidden_size, config.rms_norm_eps, config.rope_theta)
+            attention.sa_indexer.q_proj.__class__ = KeyeLinear
+            attention.sa_indexer.k_proj.__class__ = KeyeLinear
 
     def pad_input_ids(self, input_ids: list[int], mm_inputs: Any) -> list[int]:
         return MultiModalityDataPaddingPatternMultimodalTokens().pad_input_tokens(input_ids, mm_inputs)

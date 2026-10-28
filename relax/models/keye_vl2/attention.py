@@ -12,6 +12,7 @@ from megatron.core.transformer.experimental_attention_variant.dsa import DSAInde
 from torch import nn
 
 from .indexer import KeyeIndexer, indexer_scores
+from .sparse_attention import compact_indices, sparse_attention
 
 
 def query_chunks(length: int, cp_size: int, cp_rank: int, chunk_size: int) -> Iterator[tuple[int, int, int]]:
@@ -105,8 +106,6 @@ class KeyeCoreAttention(nn.Module):
             # FP32 teacher keys retain GQA layout and are converted once per
             # document, rather than converting 32 expanded heads per chunk.
             teacher_k = k.detach().float().permute(1, 2, 0) if train_indexer else None
-            k = k.repeat_interleave(q.shape[1] // k.shape[1], dim=1).transpose(0, 1)
-            v = v.repeat_interleave(q.shape[1] // v.shape[1], dim=1).transpose(0, 1)
             token_offsets = local_indices[local_start : local_start + length]
             chunk_size = getattr(self.config, "keye_attention_chunk_size", 1024)
             for offset, stop, prefix in query_chunks(length, size, rank, chunk_size):
@@ -116,15 +115,12 @@ class KeyeCoreAttention(nn.Module):
                     start : start + prefix
                 ][None]
                 scores = scores.masked_fill(~causal, torch.finfo(scores.dtype).min)
-                support = (
-                    torch.zeros_like(causal).scatter_(1, scores.detach().topk(min(2048, prefix), -1).indices, True)
-                    & causal
-                )
+                selected = scores.detach().topk(min(2048, prefix), -1).indices
+                support = torch.zeros_like(causal).scatter_(1, selected, True) & causal
+                slots, counts = compact_indices(selected, causal.gather(1, selected))
                 chunk_q = q[offset:stop].transpose(0, 1)
-                output = F.scaled_dot_product_attention(
-                    chunk_q[None], k[None, :, :prefix], v[None, :, :prefix], attn_mask=support[None, None]
-                )[0]
-                outputs.append(output.transpose(0, 1).reshape(stop - offset, -1))
+                output = sparse_attention(q[offset:stop], k[:prefix], v[:prefix], slots, counts, support)
+                outputs.append(output.reshape(stop - offset, -1))
                 if train_indexer:
                     with torch.no_grad():
                         teacher_q = chunk_q.detach().float().reshape(kv_heads, -1, q.shape[-1])
