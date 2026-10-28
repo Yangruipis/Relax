@@ -65,20 +65,17 @@ ROLLOUT_ARGS=(
     --num-rollout "${NUM_ROLLOUT:-200}"
     --rollout-batch-size "${ROLLOUT_BATCH_SIZE:-32}"
     --n-samples-per-prompt "${N_SAMPLES:-8}"
-    --global-batch-size "$(( ${ROLLOUT_BATCH_SIZE:-32} * ${N_SAMPLES:-8} ))"
+    --global-batch-size "${GLOBAL_BATCH_SIZE:-128}"
     --rollout-max-response-len "${RESPONSE_LEN:-8192}"
-    --rollout-max-prompt-len 4096
-    --rollout-max-context-len 16384
     --rollout-temperature 1
     --balance-data
-    --dynamic-sampling-filter-path relax.engine.filters.dynamic_sampling_filters.check_reward_nonzero_std
 )
 EVAL_ARGS=(
     --skip-eval-before-train
     --log-passrate
     --eval-interval "${EVAL_INTERVAL:-20}"
     --eval-prompt-data aime "${DATA_DIR}/aime-2024/aime-2024.jsonl"
-    --n-samples-per-eval-prompt 1
+    --n-samples-per-eval-prompt 8
     --eval-max-response-len 16384
     --eval-top-p 0.7
 )
@@ -104,6 +101,9 @@ PERF_ARGS=(
 )
 ALGORITHM_ARGS=(
     --advantage-estimator grpo
+    --use-kl-loss
+    --kl-loss-coef 0
+    --kl-loss-type low_var_kl
     --entropy-coef 0
     --eps-clip 0.2
     --eps-clip-high 0.28
@@ -145,6 +145,12 @@ MONITOR_ARGS=(
     --tb-project-name "${PROJECT_NAME}"
     --tb-experiment-name "${EXP_NAME}-${now}"
 )
+if [ "${SAVE_DEBUG_DATA:-0}" = 1 ]; then
+    MONITOR_ARGS+=(
+        --save-debug-rollout-data "${SAVE_DIR}/${EXP_NAME}/debug/rollout/{rollout_id}.pt"
+        --save-debug-train-data "${SAVE_DIR}/${EXP_NAME}/debug/train/{rollout_id}_{rank}.pt"
+    )
+fi
 MISC_ARGS=(
     --attention-dropout 0
     --hidden-dropout 0

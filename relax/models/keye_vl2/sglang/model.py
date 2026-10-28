@@ -22,7 +22,7 @@ from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_executor.forward_context import get_req_to_token_pool, get_token_to_kv_pool
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.qwen3_moe import Qwen3MoeAttention, Qwen3MoeForCausalLM, Qwen3MoeModel
-from sglang.srt.runtime_context import get_mm, get_model
+from sglang.srt.runtime_context import get_mm, get_model, get_parallel
 
 from relax.models.keye_vl2.indexer import KeyeIndexer, indexer_scores
 from relax.models.keye_vl2.norm import RMSNorm as StableRMSNorm
@@ -49,6 +49,28 @@ class KeyeLinear(torch.nn.Linear):
 class KeyeLinearMethod(UnquantizedLinearMethod):
     def apply(self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         return padded_linear(x, layer.weight, bias)
+
+
+class KeyeRowLinearMethod(UnquantizedLinearMethod):
+    def apply(self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+        group = get_parallel().attn_tp_group
+        if group.world_size > 1:
+            x = group.all_gather(x, dim=-1)
+            if group.rank_in_group != 0:
+                return x.new_zeros((*x.shape[:-1], layer.weight.shape[0]))
+        # Round the complete dot once, before the existing layer communicator
+        # broadcasts it by summing rank zero's result with the other ranks' zeros.
+        return padded_linear(x, layer.weight, bias)
+
+
+def _replicated_expert_weight_loader(
+    parameter: torch.nn.Parameter,
+    weight: torch.Tensor,
+    name: str = "",
+    shard_id: str = "w2",
+    expert_id: int | None = None,
+) -> None:
+    default_weight_loader(parameter if expert_id is None else parameter[expert_id], weight)
 
 
 def decode_attention(
@@ -165,7 +187,12 @@ class KeyeExperts(FusedMoE):
         if self.num_local_experts != self.num_experts:
             raise ValueError("Keye rollout currently requires tensor-parallel experts")
         return expert_forward(
-            hidden_states, self.w13_weight, self.w2_weight, topk_output.topk_weights, topk_output.topk_ids
+            hidden_states,
+            self.w13_weight,
+            self.w2_weight,
+            topk_output.topk_weights,
+            topk_output.topk_ids,
+            get_parallel().moe_tp_group,
         )
 
 
@@ -232,13 +259,21 @@ class KeyeVL2MoeForConditionalGeneration(Qwen3MoeForCausalLM):
             KeyeRMSNorm.convert(layer.post_attention_layernorm)
             layer.mlp.gate.__class__ = KeyeRouter
             layer.mlp.experts.__class__ = KeyeExperts
+            if get_parallel().moe_tp_size > 1:
+                weight = layer.mlp.experts.w2_weight
+                weight.data = weight.new_empty((*weight.shape[:2], config.moe_intermediate_size))
+                weight.weight_loader = _replicated_expert_weight_loader
             layer.mlp.topk.topk_config.custom_routing_function = keye_routing
             attention = layer.self_attn
             KeyeRMSNorm.convert(attention.q_norm)
             KeyeRMSNorm.convert(attention.k_norm)
             attention.__class__ = KeyeAttention
             attention.qkv_proj.quant_method = KeyeLinearMethod()
-            attention.o_proj.quant_method = KeyeLinearMethod()
+            attention.o_proj.quant_method = KeyeRowLinearMethod()
+            if get_parallel().attn_tp_size > 1:
+                weight = attention.o_proj.weight
+                weight.data = weight.new_empty((weight.shape[0], config.num_attention_heads * attention.head_dim))
+                weight.weight_loader = default_weight_loader
             attention.keye_multimodal_enabled = bool(self.multimodal_enabled)
             attention.sa_indexer = KeyeIndexer(config.hidden_size, config.rms_norm_eps, config.rope_theta)
             attention.sa_indexer.q_proj.__class__ = KeyeLinear

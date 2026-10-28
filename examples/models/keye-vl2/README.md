@@ -54,7 +54,7 @@ python scripts/tools/process_openr1.py \
 先做两轮短链路检查，再启动长跑：
 
 ```bash
-NUM_ROLLOUT=2 ROLLOUT_BATCH_SIZE=8 N_SAMPLES=2 RESPONSE_LEN=512 \
+NUM_ROLLOUT=2 ROLLOUT_BATCH_SIZE=8 N_SAMPLES=2 GLOBAL_BATCH_SIZE=16 RESPONSE_LEN=512 \
   EXP_NAME=keye-dapo-smoke \
   bash examples/models/keye-vl2/scripts/run-keye-vl2-30B-A3B-8xgpu-math.sh
 
@@ -62,9 +62,9 @@ NUM_ROLLOUT=200 EXP_NAME=keye-dapo-200 \
   bash examples/models/keye-vl2/scripts/run-keye-vl2-30B-A3B-8xgpu-math.sh
 ```
 
-文本脚本默认响应上限 8192、总上下文上限 16384、全局 batch 默认为 `32 × 8 = 256`（`ROLLOUT_BATCH_SIZE × N_SAMPLES`），开启 DAPO dynamic filter，丢弃组内奖励相同的 prompt 并补采样；每卡训练 token 上限为 32768，每 20 轮进行 AIME 评估。与仓库单机 DAPO Math 示例一致，使用 GRPO 组内优势、非对称裁剪、TIS、恒定学习率 `1e-6` 和 CPU optimizer offload。文本 decode 使用融合 RoPE、保留 BF16 舍入的分页 indexer 和 SGLang 原生分页 GQA kernel，仅访问 top-2048 KV，不展开 KV heads。decode 开启 CUDA graph，prefill 保持 eager；overlap scheduling 和 radix cache 仍关闭。图像脚本目前保持 eager 调度。
+文本脚本的训练效果参数对齐 `scripts/training/text/run-qwen3-4B-8xgpu.sh`：每轮采样 `32 × 8 = 256` 条回复，全局 batch 默认为 128（可用 `GLOBAL_BATCH_SIZE` 覆盖），即每轮两次优化更新；响应上限 8192，不启用 dynamic filter，也不额外限制 prompt/context 长度。每 20 轮进行 AIME 评估，每题采样 8 次，评估响应上限 16384、top-p 为 0.7。使用 GRPO 组内优势、非对称裁剪、TIS、`low_var_kl` KL loss（系数 0）和恒定学习率 `1e-6`。每卡训练 token 上限 32768 和 CPU optimizer offload 保持 Keye 的性能配置。文本 decode 使用融合 RoPE、保留 BF16 舍入的分页 indexer 和 SGLang 原生分页 GQA kernel，仅访问 top-2048 KV，不展开 KV heads。decode 开启 CUDA graph，prefill 保持 eager；overlap scheduling 和 radix cache 仍关闭。图像脚本目前保持 eager 调度。
 
-训练主 attention 关闭 TE RoPE 融合，以保留与 rollout 一致的 BF16 逐次舍入；两侧 MoE router 用 FP64 点积生成 FP32 logits，并固定 top-k 顺序；RMSNorm 使用逐行固定归约，残差相加先舍入到 BF16。MoE 激活、路由权重和专家输出合并保留训练侧的舍入顺序。训练和 rollout 共用稀疏 GQA forward，训练 backward 重算标准 masked SDPA 梯度；无需启用 router replay。
+训练主 attention 关闭 TE RoPE 融合，以保留与 rollout 一致的 BF16 逐次舍入；两侧 MoE router 用 FP64 点积生成 FP32 logits，并固定 top-k 顺序；RMSNorm 使用逐行固定归约，残差相加先舍入到 BF16。MoE 激活、路由权重和专家输出合并保留训练侧的舍入顺序。训练和 rollout 共用稀疏 GQA forward，训练 backward 重算标准 masked SDPA 梯度；无需启用 router replay。 TP>1 推理保留完整的 attention 输出投影和专家 down 权重，汇聚输入后按完整 K 维计算，避免局部 BF16 舍入；QKV 和 gate/up 权重仍按 TP 分片。
 
 训练 attention 按每个 query 分块的最后位置截断未来 KV，默认每块 1024 个 query；FP32 teacher 保留 GQA 分组，避免反复展开和转换 KV。Indexer 辅助 KL、完整层重计算和 CPU optimizer offload 仍保留。CP 分块在 zigzag 两半边界处拆开，因果关系使用原始 token 顺序，不使用压缩后的图像坐标。
 

@@ -48,7 +48,7 @@ Keep all model weights, tokenizer/processor assets and custom Python files. The 
 Direct execution sources `scripts/entrypoint/local.sh`, which cleans existing local Ray/Python training processes. Use an exclusive eight-GPU node.
 
 ```bash
-NUM_ROLLOUT=2 ROLLOUT_BATCH_SIZE=8 N_SAMPLES=2 RESPONSE_LEN=512 \
+NUM_ROLLOUT=2 ROLLOUT_BATCH_SIZE=8 N_SAMPLES=2 GLOBAL_BATCH_SIZE=16 RESPONSE_LEN=512 \
   EXP_NAME=keye-dapo-smoke \
   bash examples/models/keye-vl2/scripts/run-keye-vl2-30B-A3B-8xgpu-math.sh
 
@@ -59,9 +59,9 @@ NUM_ROLLOUT=2 RESPONSE_LEN=512 SAVE_INTERVAL=1 EXP_NAME=keye-openr1mm-smoke \
   bash examples/models/keye-vl2/scripts/run-keye-vl2-30B-A3B-8xgpu-openr1mm.sh
 ```
 
-Text defaults: 8192 response tokens, 16384 context tokens, global batch `32 × 8 = 256` (`ROLLOUT_BATCH_SIZE × N_SAMPLES`), DAPO dynamic filtering that drops groups with identical rewards and samples replacements, 32768 training tokens per GPU, and AIME evaluation every 20 rollouts. Like the repository's single-node DAPO Math recipes, it uses GRPO group advantages, asymmetric clipping, TIS, constant learning rate `1e-6` and CPU optimizer offload. Text decode uses fused RoPE, a paged indexer preserving BF16 rounding, and SGLang’s native paged GQA kernel. It reads only the selected top-2048 KV slots without expanding KV heads. Decode uses CUDA graphs; prefill remains eager. Overlap scheduling and radix cache remain disabled. The image recipe currently retains eager scheduling.
+Training-effect settings match `scripts/training/text/run-qwen3-4B-8xgpu.sh`: sample `32 × 8 = 256` responses per rollout with a default global batch of 128 (overridable via `GLOBAL_BATCH_SIZE`), giving two optimizer updates per rollout. Responses are capped at 8192 tokens; dynamic filtering and extra prompt/context length limits are disabled. AIME evaluation runs every 20 rollouts with 8 samples per question, up to 16384 response tokens and top-p 0.7. The recipe uses GRPO group advantages, asymmetric clipping, TIS, `low_var_kl` KL loss with coefficient 0 and constant learning rate `1e-6`. Keye retains its performance settings of 32768 training tokens per GPU and CPU optimizer offload. Text decode uses fused RoPE, a paged indexer preserving BF16 rounding, and SGLang’s native paged GQA kernel. It reads only the selected top-2048 KV slots without expanding KV heads. Decode uses CUDA graphs; prefill remains eager. Overlap scheduling and radix cache remain disabled. The image recipe currently retains eager scheduling.
 
-Training disables TE RoPE fusion to preserve the same BF16 rounding as rollout. Both MoE routers compute FP64 dot products followed by FP32 logits and a fixed top-k order. RMSNorm uses a fixed row reduction, and residual addition rounds to BF16 first. MoE activation, routing weights and expert merging preserve the training rounding order. Training and rollout share the sparse GQA forward; backward recomputes standard masked SDPA gradients. Router replay is not required.
+Training disables TE RoPE fusion to preserve the same BF16 rounding as rollout. Both MoE routers compute FP64 dot products followed by FP32 logits and a fixed top-k order. RMSNorm uses a fixed row reduction, and residual addition rounds to BF16 first. MoE activation, routing weights and expert merging preserve the training rounding order. Training and rollout share the sparse GQA forward; backward recomputes standard masked SDPA gradients. Router replay is not required. With TP>1, attention output and expert down weights remain complete; inputs are gathered before the full-K contraction to avoid rounding partial outputs to BF16. QKV and gate/up weights remain TP-sharded.
 
 Training attention truncates future KV after the last position in each query chunk, with 1024 queries per chunk. The FP32 teacher retains GQA groups to avoid repeated KV expansion and conversion. Indexer auxiliary KL, full-layer recomputation and CPU optimizer offload remain enabled. CP chunks split at zigzag half boundaries, and causality follows token order rather than compressed image coordinates.
 

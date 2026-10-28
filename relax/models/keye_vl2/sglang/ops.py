@@ -3,6 +3,7 @@
 """Graph-safe Keye operators with matching training and rollout arithmetic."""
 
 from functools import lru_cache
+from typing import Any
 
 import torch
 import triton
@@ -168,6 +169,7 @@ def expert_forward(
     down: torch.Tensor,
     probabilities: torch.Tensor,
     expert_ids: torch.Tensor,
+    tp_group: Any = None,
 ) -> torch.Tensor:
     """Match Megatron's unfused BF16 SwiGLU and pre-down routing weights."""
     from sglang.kernels.ops.moe.fused_moe_triton_kernels import invoke_fused_moe_kernel
@@ -175,9 +177,15 @@ def expert_forward(
 
     if hidden.shape[0] == 0:
         return hidden
+    sharded = tp_group is not None and tp_group.world_size > 1
+    # Config selection inspects only shapes. Use the complete contraction's
+    # geometry so column sharding does not change the GEMM reduction tiles.
+    config_weight = (
+        torch.empty((gate_up.shape[0], down.shape[2] * 2, gate_up.shape[2]), device="meta") if sharded else gate_up
+    )
     config, down_config, _, _, sorted_ids, block_experts, padded_count = _prepare_fused_moe_run(
         hidden,
-        gate_up,
+        config_weight,
         down,
         expert_ids,
         use_fp8_w8a8=False,
@@ -220,6 +228,12 @@ def expert_forward(
     # Each BF16 boundary matters: SiLU -> multiply up -> multiply FP32 route
     # probability -> BF16, all before the down GEMM, as in TEGroupedMLP.
     activated = (torch.nn.functional.silu(gate) * up * probabilities.reshape(-1, 1)).to(hidden.dtype)
+    if sharded:
+        activated = tp_group.all_gather(activated, dim=1)
+        # The existing MoE TP reduction broadcasts this complete result. Do
+        # not round partial down projections or merge partial expert outputs.
+        if tp_group.rank_in_group != 0:
+            return torch.zeros_like(hidden)
     routed = torch.empty((tokens, topk, down.shape[1]), device=hidden.device, dtype=hidden.dtype)
     invoke_fused_moe_kernel(
         activated,
