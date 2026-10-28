@@ -26,8 +26,9 @@ We publish two types of Docker images for Relax:
 
 Run these commands from the repository root. Set `REGISTRY` to your registry and optional namespace; `IMAGE_REPOSITORY` defaults to `relax`.
 
-For CUDA 12, first build the local `sglang:v0.5.21-cu129` base following
-[CUDA-129.md](../CUDA-129.md), or set `BASE_IMAGE` to your compatible SGLang 0.5.21 image.
+For CUDA 12, the default base is `ghcr.io/redai-studio/relaxrl:sglang-v0.5.21-cu129`.
+See [CUDA-129.md](../CUDA-129.md) to build your own base, or set `BASE_IMAGE`
+to another compatible SGLang 0.5.21 image.
 
 ```bash
 export REGISTRY=ghcr.io/redai-studio

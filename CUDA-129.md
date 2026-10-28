@@ -7,8 +7,10 @@ Python / Rust 包，最后组装 SGLang 基镜像。Relax 通过 `BASE_IMAGE` �
 GPU 检查脚本，不需要另一个构建仓库。后续版本沿用此流程，但需要重新核对依赖、源码
 接口和补丁；不能只修改版本号就认定兼容。
 
-Relax 公开运行镜像为 **`ghcr.io/redai-studio/relaxrl:latest`**。本文中的
-`sglang:v0.5.21-cu129` 等名字是自行构建时的本地输出名，不表示这些 tag 已在公共仓库发布。
+**已发布的 SGLang 基镜像：`ghcr.io/redai-studio/relaxrl:sglang-v0.5.21-cu129`**，
+Relax 的 CUDA 12 Dockerfile 默认使用它，可直接拉取，无需先从源码编译。
+Relax 公开运行镜像为 **`ghcr.io/redai-studio/relaxrl:latest`**。本文源码构建仍使用
+`sglang:v0.5.21-cu129` 等本地输出名，通过 `BASE_IMAGE` 可切换为自行构建的镜像。
 训练 wheel 的导出和复用见[第 6 节](#6-导出与复用训练-wheel-缓存)。
 
 ## 构建环境与版本
@@ -169,19 +171,22 @@ GPU_DEVICE=0 bash build/cu129-tools/build.sh verify
 验证包含 Triton、RMSNorm、FA3、FlashInfer、DeepGEMM、FlashMLA GPU 运算，以及离线 tiny
 Llama 生成；FA3 / FlashInfer 的生成 token 与 Transformers 参考结果逐个比较。
 
-下面的 Relax 示例使用 **0.5.21**，与当前 Dockerfile 的源码补丁和 Rust 绑定一致。
+下面的 Relax 示例使用已发布的 **0.5.21 CUDA 12.9 / Hopper 基镜像**，
+与当前 Dockerfile 的源码补丁和 Rust 绑定一致。
 0.5.20 的 SGLang 基镜像可按前文独立构建；接入 Relax 时需使用与其配套的 Dockerfile 和 patch。
 在 Relax 根目录执行：
 
 ```bash
+docker pull ghcr.io/redai-studio/relaxrl:sglang-v0.5.21-cu129
+
 TRAIN_IMAGE=ghcr.io/redai-studio/relaxrl:train-sgl0521-cu129
 DEV_IMAGE=ghcr.io/redai-studio/relaxrl:dev-sgl0521-cu129
 
 docker build --progress=plain -f docker/Dockerfile --target train \
-  --build-arg BASE_IMAGE=sglang:v0.5.21-cu129 -t "$TRAIN_IMAGE" .
+  --build-arg BASE_IMAGE=ghcr.io/redai-studio/relaxrl:sglang-v0.5.21-cu129 -t "$TRAIN_IMAGE" .
 
 docker build --progress=plain -f docker/Dockerfile --target relax \
-  --build-arg BASE_IMAGE=sglang:v0.5.21-cu129 \
+  --build-arg BASE_IMAGE=ghcr.io/redai-studio/relaxrl:sglang-v0.5.21-cu129 \
   --build-arg TRAIN_IMAGE="$TRAIN_IMAGE" -t "$DEV_IMAGE" .
 ```
 
@@ -202,7 +207,7 @@ v0.5.21 使用 `v0.5.21.patch`；构建前核对 `PATCH_VERSION` 和对应 patch
 镜像；下面的本地镜像名与 `CUDA-129.md` 中的示例一致。
 
 ```bash
-BASE_IMAGE=sglang:v0.5.21-cu129
+BASE_IMAGE=ghcr.io/redai-studio/relaxrl:sglang-v0.5.21-cu129
 TRAIN_IMAGE=ghcr.io/redai-studio/relaxrl:train-sgl0521-cu129
 
 docker build --progress=plain -f docker/Dockerfile --target train \
@@ -241,7 +246,7 @@ tar 根目录包含 `manifest.json` 和以下 11 个包的 wheel：
 将 tar 放到构建机器可下载的 HTTP(S) 地址。存储方式自行选择；下面的地址仅为占位示例。
 
 ```bash
-BASE_IMAGE=sglang:v0.5.21-cu129
+BASE_IMAGE=ghcr.io/redai-studio/relaxrl:sglang-v0.5.21-cu129
 TRAIN_IMAGE=ghcr.io/redai-studio/relaxrl:train-sgl0521-cu129
 DEV_IMAGE=ghcr.io/redai-studio/relaxrl:dev-sgl0521-cu129
 CACHE_URL=https://downloads.example.com/cache/cu129-hopper-train-wheels.tar
