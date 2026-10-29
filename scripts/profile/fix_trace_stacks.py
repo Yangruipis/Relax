@@ -4,9 +4,15 @@ stacks.
 
 Usage: python3 scripts/profile/fix_trace_stacks.py tmp/traces/*.trace.json.gz
 Writes fixed/<name>.fixed-stacks.trace.json.gz beside each input.
-Always writes fixed/merged.trace.json.gz beside the first input, grouped by CPU/GPU stream, then rank.
+By default writes fixed/merged.trace.json.gz beside the first input, grouped by CPU/GPU stream, then rank.
 Use --merge PATH only to override the merged output path.
 Uses only the Python standard library and streams large traces.
+
+Fix and trim each rank independently, without merging (default: middle 4 forward calls):
+  python3 scripts/profile/fix_trace_stacks.py tmp/traces/*.trace.json.gz --per-rank
+Writes fixed/<name>.fixed-stacks.trimmed.trace.json.gz beside each input.
+--output-dir overrides the destination; --overview retains the full-step overview instead.
+Time/microbatch windows are selected independently for each rank.
 
 Independently trim an existing merged trace (does not repair or merge again):
   python3 scripts/profile/fix_trace_stacks.py merged.trace.json.gz --trim-merged --microbatch-count 4
@@ -346,7 +352,9 @@ def flow_key(event: dict) -> tuple:
     return event.get("scope"), event.get("id"), json.dumps(event.get("id2"), sort_keys=True)
 
 
-def trim_merged(source: Path, output: Path, options: argparse.Namespace, window: tuple = None) -> None:
+def trim_merged(
+    source: Path, output: Path, options: argparse.Namespace, window: tuple = None, origin: Path = None
+) -> None:
     """Stream a cropped copy, preserving linked launches, flows and referenced
     stack frames."""
     overview = getattr(options, "overview", False)
@@ -387,7 +395,7 @@ def trim_merged(source: Path, output: Path, options: argparse.Namespace, window:
                         pending.append(str(parent))
                 tail["stackFrames"] = {key: value for key, value in frames.items() if key in referenced}
                 tail["trimInfo"] = {
-                    "source": str(source),
+                    "source": str(origin or source),
                     "start_us": None if overview else lo,
                     "end_us": None if overview else hi,
                     "input_events": total,
@@ -452,6 +460,32 @@ def trim_fixed(sources: list, output: Path, options: argparse.Namespace) -> None
     print(f"Trimmed and merged trace -> {output}", flush=True)
 
 
+def fix_trim_per_rank(sources: list[Path], options: argparse.Namespace) -> None:
+    """Repair and crop each raw trace, publishing separate files without a
+    merge."""
+    suffix = ".overview.trace.json.gz" if options.overview else ".trimmed.trace.json.gz"
+    outputs = [
+        (options.output_dir or source.parent / "fixed")
+        / (source.name.removesuffix(".trace.json.gz") + ".fixed-stacks" + suffix)
+        for source in sources
+    ]
+    protected = {source.resolve() for source in sources}
+    if len({output.resolve() for output in outputs}) != len(outputs):
+        raise ValueError("Per-rank output names collide; use distinct input filenames")
+    if any(output.exists() or output.resolve() in protected for output in outputs):
+        raise ValueError("Per-rank outputs must be new files; choose a new --output-dir")
+    for source, output in zip(sources, outputs):
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="per-rank-", dir=output.parent) as temporary:
+            repaired = fix(source, Path(temporary) / "repaired.trace.json.gz")
+            window = None
+            if not options.overview:
+                lo, hi, _ = trim_window(repaired, options)
+                # One rank per input: CPU and GPU correlations share a local key.
+                window = (lo, hi, {})
+            trim_merged(repaired, output, options, window=window, origin=source)
+
+
 def export_views(sources: list, directory: Path, options: argparse.Namespace) -> None:
     """Build both final merged views from raw dumps, keeping intermediates
     temporary."""
@@ -504,10 +538,13 @@ if __name__ == "__main__":
     parser.add_argument("--trim-merged", action="store_true", help="Only trim one existing merged trace")
     parser.add_argument("--trim-fixed", action="store_true", help="Trim existing per-rank fixed traces and merge them")
     parser.add_argument(
+        "--per-rank", action="store_true", help="Fix and trim each raw rank independently; never merge"
+    )
+    parser.add_argument(
         "--overview", action="store_true", help="Full-step overview: omit Python/CPU ops and stack text"
     )
     parser.add_argument("--export-views", action="store_true", help="From raw dumps, export overview and local detail")
-    parser.add_argument("--output-dir", type=Path, help="Directory for the two --export-views outputs")
+    parser.add_argument("--output-dir", type=Path, help="Output directory for --export-views or --per-rank")
     parser.add_argument("--reuse-fixed", action="store_true", help="Reuse newer fixed copies with matching headers")
     parser.add_argument("--output", type=Path, help="New trimmed output path; input is never overwritten")
     parser.add_argument("--window-start-ms", type=float, default=0, help="Window offset from first timestamp")
@@ -523,6 +560,7 @@ if __name__ == "__main__":
         if (
             options.trim_fixed
             or options.trim_merged
+            or options.per_rank
             or options.overview
             or options.merge
             or options.output
@@ -543,8 +581,15 @@ if __name__ == "__main__":
             parser.error("Microbatch count must be positive and start must be non-negative")
         export_views(options.traces, options.output_dir, options)
         raise SystemExit(0)
-    if options.output_dir or options.reuse_fixed:
-        parser.error("--output-dir and --reuse-fixed require --export-views")
+    if options.reuse_fixed or (options.output_dir and not options.per_rank):
+        parser.error("--reuse-fixed requires --export-views; --output-dir requires --export-views or --per-rank")
+    if options.per_rank:
+        if options.trim_fixed or options.trim_merged or options.merge or options.output:
+            parser.error("--per-rank cannot use --trim-fixed, --trim-merged, --merge or --output")
+        if any(not p.name.endswith(".trace.json.gz") or ".fixed-stacks." in p.name for p in options.traces):
+            parser.error("--per-rank requires raw .trace.json.gz inputs")
+        if not options.overview and options.microbatch_count is None and options.window_duration_ms is None:
+            options.microbatch_count = 4
     trim_options = (
         options.output is not None
         or options.window_start_ms != 0
@@ -555,7 +600,7 @@ if __name__ == "__main__":
         or options.drop_call_stacks
         or options.overview
     )
-    if options.trim_merged or options.trim_fixed:
+    if options.trim_merged or options.trim_fixed or options.per_rank:
         if options.trim_merged and options.trim_fixed:
             parser.error("Choose either --trim-merged or --trim-fixed")
         if options.merge or (options.trim_merged and len(options.traces) != 1):
@@ -588,6 +633,9 @@ if __name__ == "__main__":
             )
         ):
             parser.error("Window start must be non-negative and duration must be positive")
+        if options.per_rank:
+            fix_trim_per_rank(options.traces, options)
+            raise SystemExit(0)
         source = options.traces[0]
         default_name = (
             "merged.trimmed.trace.json.gz"
@@ -611,7 +659,7 @@ if __name__ == "__main__":
             trim_merged(source, output, options)
         raise SystemExit(0)
     if trim_options:
-        parser.error("Trimming options require --trim-merged or --trim-fixed")
+        parser.error("Trimming options require --trim-merged, --trim-fixed or --per-rank")
     if len({p.resolve() for p in options.traces}) != len(options.traces):
         parser.error("Duplicate input files")
     output = options.merge or options.traces[0].parent / "fixed" / "merged.trace.json.gz"
