@@ -52,9 +52,10 @@ RUN if [ -n "${PREBUILD_CACHE_TAR_URL}" ]; then \
         tar -xf /tmp/train-wheels.tar -C /tmp/train-wheels && \
         python /opt/relax/export_train_wheels.py check /tmp/train-wheels && \
         MODELOPT_VERSION=$(python -c 'import json; print(json.load(open("/tmp/train-wheels/manifest.json"))["packages"]["nvidia-modelopt"])') && \
+        pip install --no-cache-dir --force-reinstall --no-deps /tmp/train-wheels/*.whl && \
         pip install --no-cache-dir /tmp/train-wheels/*.whl \
             "nvidia-modelopt[torch]==${MODELOPT_VERSION}" "flash-linear-attention==0.4.2" "tilelang==0.1.12" \
-            "numpy<2" nvidia-cudnn-cu12==9.20.0.48 && \
+            "numpy<2" "scipy<1.18" "ml-dtypes<0.6" nvidia-cudnn-cu12==9.20.0.48 && \
         rm -rf /tmp/train-wheels /tmp/train-wheels.tar; \
     else \
         FLASH_ATTENTION_FORCE_BUILD=TRUE MAX_JOBS=64 pip -v install flash-attn==2.7.4.post1 --no-build-isolation --no-cache-dir && \
@@ -111,7 +112,7 @@ RUN if [ -z "${PREBUILD_CACHE_TAR_URL}" ]; then \
         NVTE_PYTORCH_FORCE_BUILD=TRUE pip -v install --no-cache-dir --no-build-isolation "transformer_engine[pytorch]==2.14.1" && \
     TMS_CUDA_MAJOR=$(python -c 'import torch; print(torch.version.cuda.split(".")[0])') pip install git+https://github.com/redai-studio/torch_memory_saver.git@afc13785c50119048e2dd8ac497cc9e29ec75bd4 --no-cache-dir --force-reinstall && \
     pip install "nvidia-modelopt[torch]>=0.37.0" --no-build-isolation --no-cache-dir && \
-    pip install "numpy<2" nvidia-cudnn-cu12==9.20.0.48 --no-cache-dir && \
+    pip install "numpy<2" "scipy<1.18" "ml-dtypes<0.6" nvidia-cudnn-cu12==9.20.0.48 --no-cache-dir && \
     NVCC_APPEND_FLAGS="--threads 32" \
     pip -v install --disable-pip-version-check --no-cache-dir \
     --no-build-isolation \
@@ -130,7 +131,10 @@ RUN if [ -z "${PREBUILD_CACHE_TAR_URL}" ]; then \
     else rm -rf /tmp/int4_qat; fi
 
 # Keep the training data stack compatible with NumPy 1.26.
+COPY docker/scripts/repair_te_wheel_metadata.py \
+    docker/patch/transformer_engine/2.14.1-cu12-wheel-tag.patch /opt/relax/
 RUN pip install --no-cache-dir --no-deps pandas==3.0.6 pyarrow==24.0.0 && \
+    python /opt/relax/repair_te_wheel_metadata.py /opt/relax/2.14.1-cu12-wheel-tag.patch && \
     pip check && python -c "import pandas, pyarrow, datasets"
 
 ARG TRAIN_IMAGE=train
