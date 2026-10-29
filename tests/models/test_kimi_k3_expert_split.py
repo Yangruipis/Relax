@@ -168,8 +168,11 @@ def test_expert_split_gradients_and_optimizer(input_is_parallel, backend, case, 
 
 
 @pytest.mark.skipif(not GPU, reason="Set RELAX_TEST_K3_OPS_GPU=1 on an idle CUDA GPU")
-def test_expert_split_removes_full_input_slice_backward():
+@pytest.mark.parametrize("backend,expected_split_backward", [("grouped", 0), ("per_expert", 1)])
+def test_expert_split_removes_full_input_slice_backward(backend, expected_split_backward):
     original = make_adapter(True)
+    if backend == "per_expert":
+        original._can_use_grouped_mm = lambda x: False
     with torch.no_grad():
         original.linear_out.weight.normal_(0, 0.02)
     candidate = optimize(copy.deepcopy(original))
@@ -183,7 +186,7 @@ def test_expert_split_removes_full_input_slice_backward():
         counts.append({e.key: e.count for e in profile.key_averages()})
     assert counts[0].get("aten::slice_backward", 0) == 56
     assert counts[1].get("aten::slice_backward", 0) == 0
-    assert counts[1].get("SplitWithSizesBackward0", 0) == 1
+    assert counts[1].get("SplitWithSizesBackward0", 0) == expected_split_backward
 
 
 def test_training_ops_expert_split_installation(monkeypatch):
