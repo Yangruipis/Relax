@@ -1,7 +1,7 @@
 #!/bin/bash
 # Copyright (c) 2026 Relax Authors. All Rights Reserved.
-# Text-only Keye DAPO Math RL, 200 rollouts; SAVE_CHECKPOINT=0 by default.
-# Set SAVE_CHECKPOINT=1 to save/resume the stable SAVE_DIR/EXP_NAME checkpoint.
+# Text-only Keye DAPO Math RL, 200 rollouts; checkpoint every 20 updates.
+# Save/resume the stable SAVE_DIR/EXP_NAME checkpoint; SAVE_CHECKPOINT=0 disables it.
 # Usage: MODEL_DIR=/models DATA_DIR=/data SAVE_DIR=/checkpoints bash examples/models/keye-vl2/scripts/run-keye-vl2-30B-A3B-8xgpu-math.sh
 
 set -eo pipefail
@@ -18,7 +18,7 @@ source "${SCRIPT_DIR}/keye-vl2-30B-A3B.sh"
 
 PROJECT_NAME="${PROJECT_NAME:-Relax/rl/dapo-math}"
 EXP_NAME="${EXP_NAME:-keye-vl2-30b-a3b-dapo-8xgpu-colocate}"
-SAVE_CHECKPOINT="${SAVE_CHECKPOINT:-0}"
+SAVE_CHECKPOINT="${SAVE_CHECKPOINT:-1}"
 case "${SAVE_CHECKPOINT}" in
     0|1) ;;
     *) echo "SAVE_CHECKPOINT must be 0 or 1" >&2; exit 2 ;;
@@ -63,7 +63,7 @@ ROLLOUT_ARGS=(
     --rm-type dapo
     --reward-key score
     --num-rollout "${NUM_ROLLOUT:-200}"
-    --rollout-batch-size "${ROLLOUT_BATCH_SIZE:-32}"
+    --rollout-batch-size "${ROLLOUT_BATCH_SIZE:-16}"
     --n-samples-per-prompt "${N_SAMPLES:-8}"
     --global-batch-size "${GLOBAL_BATCH_SIZE:-128}"
     --rollout-max-response-len "${RESPONSE_LEN:-8192}"
@@ -81,7 +81,8 @@ EVAL_ARGS=(
 )
 PERF_ARGS=(
     --no-rope-fusion
-    --tensor-model-parallel-size 1
+    --tensor-model-parallel-size 4
+    --sequence-parallel
     --pipeline-model-parallel-size 1
     --context-parallel-size 1
     --expert-model-parallel-size 8

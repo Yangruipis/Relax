@@ -10,6 +10,7 @@ from megatron.bridge.models.conversion.param_mapping import (
     FusedGatedExpertMapping,
     QKVMapping,
     ReplicatedMapping,
+    RowParallelMapping,
 )
 from megatron.bridge.models.qwen.qwen3_moe_bridge import Qwen3MoEBridge
 from megatron.core.models.gpt.gpt_model import GPTModel
@@ -40,10 +41,14 @@ class KeyeBridge(Qwen3MoEBridge):
             "decoder.layers.*.pre_mlp_layernorm.weight": "model.layers.*.post_attention_layernorm.weight",
             "decoder.layers.*.self_attention.q_layernorm.weight": "model.layers.*.self_attn.q_norm.weight",
             "decoder.layers.*.self_attention.k_layernorm.weight": "model.layers.*.self_attn.k_norm.weight",
-            "decoder.layers.*.self_attention.linear_proj.weight": "model.layers.*.self_attn.o_proj.weight",
         }
         prefix = "language_model." if getattr(self, "_multimodal", False) else ""
         mappings = [AutoMapping(prefix + k, v) for k, v in names.items()]
+        mappings.append(
+            RowParallelMapping(
+                prefix + "decoder.layers.*.self_attention.linear_proj.weight", "model.layers.*.self_attn.o_proj.weight"
+            )
+        )
         mappings.append(
             ReplicatedMapping(prefix + "decoder.layers.*.mlp.router.weight", "model.layers.*.mlp.gate.weight")
         )

@@ -12,6 +12,7 @@ from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.spec_utils import ModuleSpec
 
 from .attention import KeyeCoreAttention, KeyeSelfAttention
+from .linear import KeyeRowParallelLinear
 
 
 class _StableTopK:
@@ -60,6 +61,7 @@ def keye_layer_spec(config: GPTModelProvider) -> ModuleSpec:
     spec.submodules.self_attention.module = KeyeSelfAttention
     spec.submodules.self_attention.submodules.linear_qkv = TEColumnParallelLinear
     spec.submodules.self_attention.submodules.core_attention = KeyeCoreAttention
+    spec.submodules.self_attention.submodules.linear_proj = KeyeRowParallelLinear
     mlp = spec.submodules.mlp
     submodules = mlp.keywords["submodules"] if hasattr(mlp, "keywords") else mlp.submodules
     submodules.router = KeyeTopKRouter

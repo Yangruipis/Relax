@@ -1,11 +1,12 @@
 # Copyright (c) 2026 Relax Authors. All Rights Reserved.
 
-"""Chunked reference GQA/DSA for the TP1 Keye training path with zigzag CP."""
+"""Chunked reference GQA/DSA with tensor parallelism and zigzag CP."""
 
 from collections.abc import Iterator
 from typing import Any
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from megatron.core.transformer.attention import SelfAttention
 from megatron.core.transformer.experimental_attention_variant.dsa import DSAIndexerLossAutoScaler
@@ -50,14 +51,17 @@ class KeyeSelfAttention(SelfAttention):
 class KeyeCoreAttention(nn.Module):
     def __init__(self, config: Any, layer_number: int, **kwargs: Any) -> None:
         super().__init__()
-        if config.tensor_model_parallel_size != 1:
-            raise ValueError("Keye reference attention supports TP1; use EP to distribute experts")
         self.config = config
+        self.tp_size = config.tensor_model_parallel_size
+        self.tp_group = getattr(kwargs.get("pg_collection"), "tp", None)
+        if self.tp_size > 1 and (not config.sequence_parallel or self.tp_group is None):
+            raise ValueError("Keye TP attention requires sequence parallelism and an explicit TP group")
         self.cp_group = getattr(kwargs.get("pg_collection"), "cp", None)
         self.sa_indexer = KeyeIndexer(config.hidden_size, config.layernorm_epsilon, config.rotary_base)
         for parameter in self.sa_indexer.parameters():
             parameter.allreduce = True
             parameter.sequence_parallel = False
+            parameter.average_gradients_across_tp_domain = self.tp_size > 1
 
     def forward(
         self,
@@ -71,6 +75,12 @@ class KeyeCoreAttention(nn.Module):
     ) -> torch.Tensor:
         if query.ndim != 3 or hidden_states.shape[1] != 1 or packed_seq_params is None:
             raise ValueError("Keye training requires packed THD inputs with micro batch size 1")
+        if self.tp_size > 1:
+            from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
+
+            hidden_states = gather_from_sequence_parallel_region(
+                hidden_states.detach(), tensor_parallel_output_grad=False, group=self.tp_group
+            )
         boundaries = getattr(packed_seq_params, "cu_seqlens_q_cpu", None)
         if boundaries is None:
             raise ValueError("Keye requires CPU packed boundaries supplied by Relax's data loader")
@@ -130,6 +140,8 @@ class KeyeCoreAttention(nn.Module):
                         )
                         target = target_logits.masked_fill(~support.unsqueeze(0), float("-inf")).softmax(-1).mean(0)
                         target = target.nan_to_num()
+                        if self.tp_size > 1:
+                            dist.all_reduce(target, op=dist.ReduceOp.AVG, group=self.tp_group)
                     log_probs = scores.float().masked_fill(~support, torch.finfo(torch.float32).min).log_softmax(-1)
                     kl = F.kl_div(log_probs, target, reduction="none").sum(-1)
                     auxiliary = auxiliary + (kl * valid.index_select(0, token_offsets[offset:stop])).sum()

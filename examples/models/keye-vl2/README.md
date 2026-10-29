@@ -10,11 +10,11 @@
 
 | 文件                                                                                       | 用途                                         | 训练并行                     | 默认 prompt × 采样数 |
 | ------------------------------------------------------------------------------------------ | -------------------------------------------- | ---------------------------- | -------------------- |
-| [run-keye-vl2-30B-A3B-8xgpu-math.sh](./scripts/run-keye-vl2-30B-A3B-8xgpu-math.sh)         | DAPO Math，AIME-2024 评估；不保存 checkpoint | TP1 / PP1 / CP1 / EP8        | 8 × 8                |
+| [run-keye-vl2-30B-A3B-8xgpu-math.sh](./scripts/run-keye-vl2-30B-A3B-8xgpu-math.sh)         | DAPO Math，AIME-2024 评估；每 20 步保存      | TP4 / SP / PP1 / CP1 / EP8   | 16 × 8               |
 | [run-keye-vl2-30B-A3B-8xgpu-openr1mm.sh](./scripts/run-keye-vl2-30B-A3B-8xgpu-openr1mm.sh) | OpenR1-MM 图像 RL；视觉塔和投影层参与训练    | TP1 / PP1 / CP2 zigzag / EP8 | 4 × 2                |
 | [keye-vl2-30B-A3B.sh](./scripts/keye-vl2-30B-A3B.sh)                                       | 复用 Qwen3-MoE 尺寸配置，设置 Keye RoPE base | —                            | —                    |
 
-当前训练路径要求 TP1、PP1；不支持动态 CP、contiguous CP、视频和音频。图像训练在注入完整图像特征后按逐样本 zigzag 布局切分 CP，跨 rank 汇聚 K/V 和 indexer K。文本 rollout 默认使用 4 个 TP2 SGLang engine；`SGLANG_TP` 可调整每个 engine 的卡数。图像脚本保持 1 个 TP8 engine，参数直接写在启动脚本中。
+纯文本训练使用 TP4 和 sequence parallel；图像训练仍要求 TP1、PP1。不支持动态 CP、contiguous CP、视频和音频。图像训练在注入完整图像特征后按逐样本 zigzag 布局切分 CP，跨 rank 汇聚 K/V 和 indexer K。文本 rollout 默认使用 4 个 TP2 SGLang engine；`SGLANG_TP` 可调整每个 engine 的卡数。图像脚本保持 1 个 TP8 engine，参数直接写在启动脚本中。
 
 ## 模型与数据准备
 
@@ -62,15 +62,13 @@ NUM_ROLLOUT=200 EXP_NAME=keye-dapo-200 \
   bash examples/models/keye-vl2/scripts/run-keye-vl2-30B-A3B-8xgpu-math.sh
 ```
 
-文本脚本的训练效果参数对齐 `scripts/training/text/run-qwen3-4B-8xgpu.sh`：每轮采样 `32 × 8 = 256` 条回复，全局 batch 默认为 128（可用 `GLOBAL_BATCH_SIZE` 覆盖），即每轮两次优化更新；响应上限 8192，不启用 dynamic filter，也不额外限制 prompt/context 长度。每 20 轮进行 AIME 评估，每题采样 8 次，评估响应上限 16384、top-p 为 0.7。使用 GRPO 组内优势、非对称裁剪、TIS、`low_var_kl` KL loss（系数 0）和恒定学习率 `1e-6`。每卡训练 token 上限 32768 和 CPU optimizer offload 保持 Keye 的性能配置。文本 decode 使用融合 RoPE、保留 BF16 舍入的分页 indexer 和 SGLang 原生分页 GQA kernel，仅访问 top-2048 KV，不展开 KV heads。decode 开启 CUDA graph，prefill 保持 eager；overlap scheduling 和 radix cache 仍关闭。图像脚本目前保持 eager 调度。
+文本脚本每轮采样 `16 × 8 = 128` 条回复，全局 batch 默认为 128（可用 `GLOBAL_BATCH_SIZE` 覆盖），即每轮一次优化更新。其余训练效果参数对齐 `scripts/training/text/run-qwen3-4B-8xgpu.sh`：响应上限 8192，不启用 dynamic filter，也不额外限制 prompt/context 长度。每 20 轮进行 AIME 评估，每题采样 8 次，评估响应上限 16384、top-p 为 0.7。使用 GRPO 组内优势、非对称裁剪、TIS、`low_var_kl` KL loss（系数 0）和恒定学习率 `1e-6`。每卡训练 token 上限 32768 和 CPU optimizer offload 保持 Keye 的性能配置。文本 decode 使用融合 RoPE、保留 BF16 舍入的分页 indexer 和 SGLang 原生分页 GQA kernel，仅访问 top-2048 KV，不展开 KV heads。decode 开启 CUDA graph，prefill 保持 eager；overlap scheduling 和 radix cache 仍关闭。图像脚本目前保持 eager 调度。
 
 训练主 attention 关闭 TE RoPE 融合，以保留与 rollout 一致的 BF16 逐次舍入；两侧 MoE router 用 FP64 点积生成 FP32 logits，并固定 top-k 顺序；RMSNorm 使用逐行固定归约，残差相加先舍入到 BF16。MoE 激活、路由权重和专家输出合并保留训练侧的舍入顺序。训练和 rollout 共用稀疏 GQA forward，训练 backward 重算标准 masked SDPA 梯度；无需启用 router replay。 TP>1 推理保留完整的 attention 输出投影和专家 down 权重，汇聚输入后按完整 K 维计算，避免局部 BF16 舍入；QKV 和 gate/up 权重仍按 TP 分片。
 
 训练 attention 按每个 query 分块的最后位置截断未来 KV，默认每块 1024 个 query；FP32 teacher 保留 GQA 分组，避免反复展开和转换 KV。Indexer 辅助 KL、完整层重计算和 CPU optimizer offload 仍保留。CP 分块在 zigzag 两半边界处拆开，因果关系使用原始 token 顺序，不使用压缩后的图像坐标。
 
-文本脚本默认 `SAVE_CHECKPOINT=0`，不传 `--save`、`--load` 或 `--save-interval`。`SAVE_DIR/EXP_NAME` 仅存放 TensorBoard 和 rollout 记录；异常重启会从 HF 初始权重开始，不能恢复已完成的优化步。
-
-需要保存和恢复文本训练时，设置 `SAVE_CHECKPOINT=1`：每 `SAVE_INTERVAL` 轮保存一次（默认 20），保留两份，加载和保存均使用稳定的 `${SAVE_DIR}/${EXP_NAME}`。恢复时保持这两个变量不变；新实验更换 `EXP_NAME`。
+文本脚本默认 `SAVE_CHECKPOINT=1`：每 `SAVE_INTERVAL` 轮保存一次（默认 20），每轮一次优化更新，即每 20 step 保存完整 checkpoint，保留最近两份。加载和保存均使用稳定的 `${SAVE_DIR}/${EXP_NAME}`；恢复时保持这两个变量不变，新实验更换 `EXP_NAME`。设置 `SAVE_CHECKPOINT=0` 可关闭保存，此时重启只能从 HF 初始权重开始。
 
 图像 RL 的短链路检查：
 
