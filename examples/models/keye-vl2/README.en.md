@@ -2,7 +2,7 @@
 
 [中文](./README.md)
 
-These recipes train `Kwai-Keye/Keye-VL-2.0-30B-A3B` with Megatron/Bridge and SGLang **0.5.20**, sharing eight GPUs between training and rollout. The MoE language backbone has approximately 30B total / 3B active parameters, 48 layers, 128 experts with top-8 routing, and a top-2048 sparse attention indexer. Image training adds the native Keye vision tower, projector and three-axis mRoPE. The adapter lives in [relax/models/keye_vl2](../../../relax/models/keye_vl2).
+These recipes train `Kwai-Keye/Keye-VL-2.0-30B-A3B` with Megatron/Bridge and SGLang **0.5.21**, sharing eight GPUs between training and rollout. The MoE language backbone has approximately 30B total / 3B active parameters, 48 layers, 128 experts with top-8 routing, and a top-2048 sparse attention indexer. Image training adds the native Keye vision tower, projector and three-axis mRoPE. The adapter lives in [relax/models/keye_vl2](../../../relax/models/keye_vl2).
 
 Use a compatible Relax training environment with Megatron/Bridge, Transformer Engine and `fast_hadamard_transform`; matching the SGLang version alone is insufficient.
 

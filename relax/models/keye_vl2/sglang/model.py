@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Relax Authors. All Rights Reserved.
 
-"""Keye on SGLang 0.5.20, with paged sparse decode and eager prefill.
+"""Keye on SGLang 0.5.21, with paged sparse decode and eager prefill.
 
 The index cache participates in SGLang's existing KV memory saver region.
 Overlap scheduling and speculative decoding are unsupported.

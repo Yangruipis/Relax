@@ -4,7 +4,7 @@
 
 这里提供 `Kwai-Keye/Keye-VL-2.0-30B-A3B` 的纯文本和图像 RL 示例。模型采用约 30B 总参数、约 3B 激活参数的 MoE 语言主干，包含 48 层、128 个专家、每 token 选择 8 个专家，并使用 top-2048 稀疏注意力 indexer。图像路径包含原生 Keye 视觉塔、投影层和三轴 mRoPE。
 
-训练使用 Megatron/Bridge，rollout 使用 SGLang **0.5.20**，8 张 GPU 共卡运行。模型适配代码位于 [relax/models/keye_vl2](../../../relax/models/keye_vl2)。请使用与仓库匹配、包含 Megatron/Bridge、Transformer Engine 和 `fast_hadamard_transform` 的训练环境；仅安装 SGLang 版本号相同不足以替代完整训练环境。
+训练使用 Megatron/Bridge，rollout 使用 SGLang **0.5.21**，8 张 GPU 共卡运行。模型适配代码位于 [relax/models/keye_vl2](../../../relax/models/keye_vl2)。请使用与仓库匹配、包含 Megatron/Bridge、Transformer Engine 和 `fast_hadamard_transform` 的训练环境；仅安装 SGLang 版本号相同不足以替代完整训练环境。
 
 ## 脚本
 
