@@ -37,6 +37,8 @@ from ray import serve
 from transformers import AutoConfig, AutoTokenizer
 
 from relax.components.base import Base
+from relax.engine.sft.data_state import restore_data_state, save_data_state
+from relax.engine.sft.dataset import streaming as streaming_dataset
 from relax.engine.sft.dataset.preference import (
     PreferenceStreamingDataset,
     ProcessedPreferencePair,
@@ -53,6 +55,7 @@ from relax.engine.sft.runtime import (
     should_run_sft_eval,
 )
 from relax.utils.data.processor_pool import ProcessorPool
+from relax.utils.env import Envs
 from relax.utils.logging_utils import get_logger
 from relax.utils.misc import load_function
 from relax.utils.multimodal.config import MultimodalConfig
@@ -69,7 +72,9 @@ _PAD_TOKEN_ID_KEYS = ("image_token_id", "video_token_id", "audio_token_id")
 # each carrying up to ~20 images, so the pool size sets the producer's cadence.
 # ``ProcessorPool``'s own default caps at 16 workers ("min(16, cpu_count)"),
 # which can leave the consumer waiting whenever the producer is the pacer.
-_PRODUCER_POOL_SIZE = min(64, os.cpu_count() or 16)
+_PRODUCER_POOL_SIZE = Envs.RELAX_PROCESSOR_POOL_SIZE
+if _PRODUCER_POOL_SIZE is None:
+    _PRODUCER_POOL_SIZE = min(64, os.cpu_count() or 16)
 
 
 def _load_custom_dataset_class(path: str | None) -> type | None:
@@ -869,8 +874,11 @@ class SFT(Base):
                     image_preprocess_on_rank=getattr(self.config, "sft_image_preprocess_on_rank", False),
                 )
 
-        # Resume: align IndexManager with `start_rollout_id` so a restart sees
-        # the same shuffled order it would on a fresh run.
+        if isinstance(self._dataset, streaming_dataset.SFTStreamingDataset):
+            restore_data_state(self.config, self._dataset, self.step, self._train_size)
+            return
+
+        # Preserve custom dataset positioning contracts.
         if self._train_size > 0:
             consumed = self.step * self.config.global_batch_size
             start_epoch = consumed // self._train_size
@@ -1035,6 +1043,8 @@ class SFT(Base):
                 "after bounded refill attempts. Refusing to push a partial TQ partition because the Megatron "
                 "consumer requires a full global batch. Check invalid-multimodal and oversize skip warnings."
             )
+        if isinstance(self._dataset, streaming_dataset.SFTStreamingDataset):
+            save_data_state(self.config, self._dataset, self.step + 1, self._train_size, samples)
         self._maybe_print_first_sample(samples)
         put_started = time.monotonic()
         for partition_id, shard_samples in zip(
