@@ -22,7 +22,7 @@ from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_executor.forward_context import get_req_to_token_pool, get_token_to_kv_pool
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.qwen3_moe import Qwen3MoeAttention, Qwen3MoeForCausalLM, Qwen3MoeModel
-from sglang.srt.runtime_context import get_mm, get_model, get_parallel
+from sglang.srt.runtime_context import get_model, get_parallel, process_model_config
 
 from relax.models.keye_vl2.indexer import KeyeIndexer, indexer_scores
 from relax.models.keye_vl2.norm import RMSNorm as StableRMSNorm
@@ -153,7 +153,7 @@ class KeyeAttention(Qwen3MoeAttention):
                 req_to_token,
                 forward_batch.req_pool_indices,
                 forward_batch.seq_lens,
-                min(req_to_token.shape[1], get_model().context_length),
+                min(req_to_token.shape[1], get_model().context_length or req_to_token.shape[1]),
             )
             output, _ = self.o_proj(output)
             return output
@@ -250,7 +250,7 @@ class KeyeVL2MoeForConditionalGeneration(Qwen3MoeForCausalLM):
         super().__init__(config, quant_config, prefix)
         self.lm_head.quant_method = KeyeLinearMethod()
         self.model.__class__ = KeyeLanguageModel
-        self.multimodal_enabled = get_mm().enable_multimodal
+        self.multimodal_enabled = process_model_config().is_multimodal
         if self.multimodal_enabled:
             self.visual, self.mlp_AR = build_vision(config, get_model().model_path)
         KeyeRMSNorm.convert(self.model.norm)

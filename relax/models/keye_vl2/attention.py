@@ -96,7 +96,16 @@ class KeyeCoreAttention(nn.Module):
             )
         valid = getattr(packed_seq_params, "keye_valid_mask", None)
         if valid is None:
-            valid = indices < getattr(packed_seq_params, "num_valid_tokens", boundaries[-1])
+            valid_lengths = getattr(packed_seq_params, "valid_seqlens_q_cpu", None)
+            if valid_lengths is None:
+                valid = indices < getattr(packed_seq_params, "num_valid_tokens", boundaries[-1])
+            else:
+                valid = torch.cat(
+                    [
+                        indices[start:end] - start < length
+                        for start, end, length in zip(boundaries[:-1], boundaries[1:], valid_lengths, strict=True)
+                    ]
+                )
         local_indices = gdn_cp_slice(indices, boundaries, size, rank) if size > 1 else indices
         local_positions = positions.index_select(0, local_indices)
         iq, ik, iw = self.sa_indexer(hidden_states[:, 0], local_positions)
