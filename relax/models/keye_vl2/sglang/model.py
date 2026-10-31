@@ -22,7 +22,7 @@ from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_executor.forward_context import get_req_to_token_pool, get_token_to_kv_pool
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.qwen3_moe import Qwen3MoeAttention, Qwen3MoeForCausalLM, Qwen3MoeModel
-from sglang.srt.runtime_context import get_model, get_parallel, process_model_config
+from sglang.srt.runtime_context import get_model, get_parallel
 
 from relax.models.keye_vl2.indexer import KeyeIndexer, indexer_scores
 from relax.models.keye_vl2.norm import RMSNorm as StableRMSNorm
@@ -30,6 +30,16 @@ from relax.models.keye_vl2.sparse_attention import compact_indices, sparse_atten
 from relax.models.keye_vl2.vision import build_vision, image_features
 
 from .ops import expert_forward, paged_decode, rope
+
+
+try:
+    from sglang.srt.runtime_context import process_model_config
+except ImportError:
+    # SGLang 0.5.17 keeps the resolved ModelConfig on ServerArgs.
+    from sglang.srt.runtime_context import get_server_args
+
+    def process_model_config() -> Any:
+        return get_server_args().get_model_config()
 
 
 def padded_linear(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:

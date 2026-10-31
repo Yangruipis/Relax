@@ -183,7 +183,7 @@ def expert_forward(
     config_weight = (
         torch.empty((gate_up.shape[0], down.shape[2] * 2, gate_up.shape[2]), device="meta") if sharded else gate_up
     )
-    config, down_config, _, _, sorted_ids, block_experts, padded_count = _prepare_fused_moe_run(
+    config, down_config, *_, sorted_ids, block_experts, padded_count = _prepare_fused_moe_run(
         hidden,
         config_weight,
         down,
